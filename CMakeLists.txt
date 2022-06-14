@@ -8,8 +8,8 @@ if(EMSCRIPTEN)
 
     include_directories(D:/SDKs/emsdk/upstream/emscripten/cache/sysroot/include ${SDL2_INCLUDE_DIRS} ${FREETYPE_INCLUDE_DIRS})
 
-    add_executable(WasmTest wasm.cpp)
-    set_target_properties(WasmTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/bin)
+    add_executable(RogueLikeGame wasm.cpp)
+    set_target_properties(RogueLikeGame PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/bin)
 else()
     add_executable(packer packer.cpp)
     set_target_properties(packer PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/bin)

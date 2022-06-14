@@ -3,10 +3,26 @@
   <head>
     <meta charset="utf-8">
     <title>Wasm example</title>
-  </head>
-  <body style="background-color: black; display: flex; align-items: center; align-content: center;">
+    <style>
+      html{
+        margin: 0;
+        padding: 0;
+      }
+      body{
+        margin: 0;
+      }
 
-    <canvas id="canvas" oncontextmenu="event.preventDefault()" tabindex="-1" width="1200px", height="600px" style=""></canvas>
+      #canvas{
+        margin: 0;
+        width: 100vw;
+        height: 100vh;
+      }
+    </style>
+  </head>
+
+  <body id="body" style="background-color: black; display: flex; align-items: center; align-content: center;">
+
+    <canvas id="canvas" oncontextmenu="event.preventDefault()" tabindex="-1"></canvas>
   </body>
 
    
@@ -26,7 +42,7 @@
     })(),
   };
 </script>
-<script src="bin/WasmTest.js">
+<script src="bin/RogueLikeGame.js">
 </script>
 
 

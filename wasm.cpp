@@ -53,6 +53,7 @@ SDL_Rect* GetAttackHitboxFromType(ENT_TYPES typ);
 SDL_Rect GetHitBoxFromType(ENT_TYPES typ);
 SDL_Rect GetAttackHitboxFromEntity(Entity* ent, int atkId);
 void SetDirection(Entity* ent);
+void SetFullScreen();
 
 
 struct Entity
@@ -66,9 +67,9 @@ struct Entity
         moveX = 0; moveY = 0; frameIdx = 0;
         typeID = type; flags = flag;
     }
-    int centerX = 0;
-    int centerY = 0;
     int health = 100;   // 100 is default health
+    int16_t centerX = 0;
+    int16_t centerY = 0;
     int16_t moveX = 0;
     int16_t moveY = 0;
     uint8_t frameIdx = 0;
@@ -142,6 +143,7 @@ static DeathBossEnemy* deathBossInfo;
 static SDL_Rect retryRect;
 static SDL_Rect healthBar;
 static bool canRetry = false;
+static bool isFullscreen = false;
 static float scale = 2.0f;
 static int currentScore = 0;
 static float currentTime = 0;
@@ -261,15 +263,18 @@ struct MobileControlCircle
 };
 struct Input
 {
-    Input(int width, int height) : state{false}, attackStates{false}
+    Input() : state{false}, attackStates{false}
     {
-        LeftAttack.posX = width - 280;
-        LeftAttack.posY = height - 100;
-        LeftAttack.rad = 80;
-        RightAttack.posX = width - 100;
-        RightAttack.posY = height - 100;
-        RightAttack.rad = 80;
-        MoveCircle.rad = 80;
+    }
+    void SetMobileCircles(int width, int height)
+    {
+        LeftAttack.posX = width - 140;
+        LeftAttack.posY = height - 50;
+        LeftAttack.rad = 40;
+        RightAttack.posX = width - 50;
+        RightAttack.posY = height - 50;
+        RightAttack.rad = 40;
+        MoveCircle.rad = 40;
     }
     ~Input() {}
     enum Btns
@@ -314,6 +319,9 @@ struct Input
             break;
         case SDL_SCANCODE_RIGHT:
             state[Btns::BTN_RIGHT] = down;
+            break;
+        case SDL_SCANCODE_F11:
+            SetFullScreen();
             break;
         default:
             break;
@@ -688,15 +696,28 @@ struct DeathBossEnemy
     DeathBossEnemy() : anims{
         {"Assets/Death-Boss/Attack.png", 10, 10},
         {"Assets/Death-Boss/Cast.png", 9, 9},
-        {"Assets/Death-Boss/Death.png", 3, 3},
-        {"Assets/Death-Boss/Hurt.png", 8, 8},
+        {"Assets/Death-Boss/Death.png", 10, 10},
+        {"Assets/Death-Boss/Hurt.png", 3, 3},
         {"Assets/Death-Boss/Idle.png", 8, 8},
         {"Assets/Death-Boss/Spell.png", 16, 16},
         {"Assets/Death-Boss/Walk.png", 8, 8},
     }
     {
+        anims[0].SetOffset(-35, 20);
+        anims[1].SetOffset(-35, 20);
+        anims[2].SetOffset(-35, 20);
+        anims[3].SetOffset(-35, 20);
+        anims[4].SetOffset(-35, 20);
+        anims[5].SetOffset(-35, 20);
+        anims[6].SetOffset(-35, 20);
+        AtkRects[0].x = -hboxW / 2 * scale - 5 * scale; AtkRects[0].y = -70 * scale; AtkRects[0].w = 120 * scale; AtkRects[0].h = 100 * scale;
+        AtkRects[1].x = -hboxW / 2 * scale - 5 * scale; AtkRects[1].y = -20 * scale; AtkRects[1].w = 50 * scale; AtkRects[1].h = 40 * scale;
+        HitBox.x = hboxW / 2 * scale; HitBox.y = hboxH / 2 * scale;
+        HitBox.w = hboxW * scale; HitBox.h = hboxH * scale;
     }
 
+    static constexpr int hboxW = 30;
+    static constexpr int hboxH = 60;
     SDL_Rect HitBox;
     SDL_Rect AtkRects[2];
     Animation anims[DeathBossAnims::NUM_ANIMATIONS];
@@ -774,13 +795,22 @@ SDL_Rect GetAttackHitboxFromEntity(Entity* ent, int atkId)
 {
     SDL_Rect* av = GetAttackHitboxFromType(ent->typeID);
     SDL_Rect result;result.x=0;result.y=0;result.w=0;result.h=0;
-    if(av)
+    if(av && atkId >= 0)
     {
         result = av[atkId];
-        if(!ent->ToRight())
+        if(ent->flags & ENT_FLAGS::SPRITE_INVERSE)
         {
-            result.x = -result.x;
-            result.x -= result.w;
+            if(ent->ToRight())
+            {
+                result.x = -result.x - result.w;
+            }
+        }
+        else
+        {
+            if(!ent->ToRight())
+            {
+                result.x = -result.x - result.w;
+            }
         }
         result.x += ent->centerX; result.y += ent->centerY;
     }
@@ -1129,7 +1159,6 @@ void EntityList::Recreate()
 {
     entList.vec.clear();
     entList.vec.push_back(PlayerEntity::Create(screenWidth/2, screenHeight/2));
-    entList.AddRandomEnemy();
     currentScore = 0;
     currentTime = 0;
     areaStartX = 0;
@@ -1137,11 +1166,10 @@ void EntityList::Recreate()
     player = nullptr;
     canRetry = false;
     g_gameStateCounter = 0;
-    Sort();
 }
 void EntityList::AddRandomEnemy()
 {
-    uint8_t num = ((uint8_t)rand() % ((uint8_t)ENT_TYPES::NUM_TYPES - 1)) + 1;
+    int entType = (rand() % 1000);
     int randX = rand() % 200;
     int randY = rand() % 200;
     int side = rand() % 4;
@@ -1166,9 +1194,14 @@ void EntityList::AddRandomEnemy()
 
     }
 
-    if(num == (uint8_t)ENT_TYPES::SKELETON)
+
+    if(entType < 900)
     {
         vec.push_back(SkeletonEntity::Create(randX, randY));
+    }
+    else if(entType > 899)
+    {
+        vec.push_back(DeathBossEntity::Create(randX, randY));
     }
 }
 
@@ -1182,7 +1215,8 @@ void EntityList::AddRandomEnemy()
 
 void PlayerHitCallback(Entity* player, Entity* hitter, int atkIdx)
 {
-    player->TakeDmg(10, MainCharacter::CharAnims::TakeHitSilhoutte, MainCharacter::CharAnims::Death);
+    int dmg = (hitter->typeID == ENT_TYPES::SKELETON) ? 10 : 30;
+    player->TakeDmg(dmg, MainCharacter::CharAnims::TakeHitSilhoutte, MainCharacter::CharAnims::Death);
 }
 void EnemyHitCallback(Entity* enemy, Entity* player, int atkIdx)
 {
@@ -1201,51 +1235,6 @@ void EnemyHitCallback(Entity* enemy, Entity* player, int atkIdx)
 
 
 
-EM_BOOL TouchStartCB(int eventType, const EmscriptenTouchEvent* ev, void* userData)
-{
-    if(canRetry)
-    {
-        for(int i = 0; i < ev->numTouches; i++)
-        {
-            auto p = ev->touches[i];
-            if(retryRect.x < p.pageX && p.pageX < retryRect.w + retryRect.x && retryRect.y < p.pageY && p.pageY < retryRect.h + retryRect.y)
-            {
-                entList.Recreate();
-            }
-        }
-    }
-    userInput->TouchButtonSetState(ev, true, false);
-    return true;
-}
-EM_BOOL TouchEndCB(int eventType, const EmscriptenTouchEvent* ev, void* userData)
-{
-    userInput->TouchButtonSetState(ev, false, false);
-    return true;
-}
-EM_BOOL TouchMoveCB(int eventType, const EmscriptenTouchEvent* ev, void* userData)
-{
-    userInput->TouchButtonSetState(ev, true, true);
-    return true;
-}
-
-
-EM_BOOL MousePressCB(int eventType, const EmscriptenMouseEvent* ev, void* userData)
-{
-    if(canRetry)
-    {
-        if(retryRect.x < ev->targetX && ev->targetX < retryRect.w + retryRect.x && retryRect.y < ev->targetY && ev->targetY < retryRect.h + retryRect.y)
-        {
-            entList.Recreate();
-        }
-    }
-    userInput->MouseButtonSetState(ev, true);
-    return true;
-}
-EM_BOOL MouseReleaseCB(int eventType, const EmscriptenMouseEvent* ev, void* userData)
-{
-    userInput->MouseButtonSetState(ev, false);
-    return true;
-}
 
 void SetPlayerAsCenterOfScreenRoughly()
 { 
@@ -1281,9 +1270,9 @@ void MainLoop()
     std::chrono::high_resolution_clock::time_point now = std::chrono::high_resolution_clock::now();
     currentTime += std::chrono::duration<float>(now - prev).count();
     SDL_Event event;
+    if(!entList.player) entList.Sort();
     Entity* player = entList.player;
 
-    g_gameStateCounter++;
     SDL_SetRenderDrawColor(renderer, 10, 10, 255, 0);
     SDL_RenderClear(renderer);
     
@@ -1294,31 +1283,35 @@ void MainLoop()
         int clipAreaX = areaStartX % screenWidth; int clipAreaY = areaStartY % screenHeight;
         if(clipAreaX < 0) clipAreaX = screenWidth + clipAreaX;
         if(clipAreaY < 0) clipAreaY = screenHeight + clipAreaY;
-        float scaleX = (float)w / (float)screenWidth;
-        float scaleY = (float)h / (float)screenHeight;
+        const float scaleX = (float)w / (float)screenWidth;
+        const float scaleY = (float)h / (float)screenHeight;
+
+        int scaleClipAreaX = clipAreaX * scaleX; int scaleClipAreaY = clipAreaY * scaleY;
+        int scaleStartX = w - scaleClipAreaX; int scaleStartY = h - scaleClipAreaY;
+        int scaleEndX = (screenWidth * scaleX) - scaleClipAreaX; int scaleEndY = (screenHeight * scaleY) - scaleClipAreaY;
 
         SDL_Rect curAreaRect; curAreaRect.x = 0; curAreaRect.y = 0;
         curAreaRect.w = clipAreaX; curAreaRect.h = clipAreaY;
-        SDL_Rect bgRect; bgRect.x = w - clipAreaX * scaleX; bgRect.y = h - clipAreaY * scaleY;
-        bgRect.w = clipAreaX * scaleX; bgRect.h = clipAreaY * scaleY;
+        SDL_Rect bgRect; bgRect.x = scaleStartX; bgRect.y = scaleStartY;
+        bgRect.w = scaleClipAreaX; bgRect.h = scaleClipAreaY;
         SDL_RenderCopy(renderer, background, &bgRect, &curAreaRect);
 
         curAreaRect.x = clipAreaX; curAreaRect.y = 0;
         curAreaRect.w = screenWidth - clipAreaX; curAreaRect.h = clipAreaY;
-        bgRect.x = 0; bgRect.y = h - clipAreaY * scaleY;
-        bgRect.w = (screenWidth - clipAreaX) * scaleX; bgRect.h = clipAreaY * scaleY;
+        bgRect.x = 0; bgRect.y = scaleStartY;
+        bgRect.w = scaleEndX; bgRect.h = scaleClipAreaY;
         SDL_RenderCopy(renderer, background, &bgRect, &curAreaRect);
 
         curAreaRect.x = 0; curAreaRect.y = clipAreaY;
         curAreaRect.w = clipAreaX; curAreaRect.h = screenHeight - clipAreaY;
-        bgRect.x = w - clipAreaX * scaleX; bgRect.y = 0;
-        bgRect.w = clipAreaX * scaleX; bgRect.h = (screenHeight - clipAreaY) * scaleY;
+        bgRect.x = scaleStartX; bgRect.y = 0;
+        bgRect.w = scaleClipAreaX; bgRect.h = scaleEndY;
         SDL_RenderCopy(renderer, background, &bgRect, &curAreaRect);
 
         curAreaRect.x = clipAreaX; curAreaRect.y = clipAreaY;
         curAreaRect.w = screenWidth - clipAreaX; curAreaRect.h = screenHeight - clipAreaY;
         bgRect.x = 0; bgRect.y = 0;
-        bgRect.w = (screenWidth - clipAreaX) * scaleX; bgRect.h = (screenHeight - clipAreaY) * scaleY;
+        bgRect.w = scaleEndX; bgRect.h = scaleEndY;
         SDL_RenderCopy(renderer, background, &bgRect, &curAreaRect);
     }
 
@@ -1373,7 +1366,7 @@ void MainLoop()
         }
     }
     if((g_gameStateCounter % 300) == 0 && !(player->flags & ENT_FLAGS::DEAD)){
-        int NumCreation = rand() % 50;
+        int NumCreation = (rand() % 20) + 10;
         for(int i = 0; i < NumCreation; i++)
             entList.AddRandomEnemy();
         entList.Sort();
@@ -1406,28 +1399,29 @@ void MainLoop()
         DrawText(ss.str().c_str(), 200, 20, 10000, 255, 255, 255, 255, false);
     }
 
+    g_gameStateCounter++;
     SDL_RenderPresent(renderer);
-
-
     prev = std::chrono::high_resolution_clock::now();
 }
 
-int main()
+
+
+
+
+
+
+void SetFullScreen()
 {
-    int fullScreen = 0;
-    emscripten_get_canvas_size(&screenWidth, &screenHeight, &fullScreen);
-
-    SDL_Init(SDL_INIT_EVERYTHING);
-    TTF_Init();
-
-    SDL_CreateWindowAndRenderer(screenWidth, screenHeight, 0, &window, &renderer);
-    userInput = new Input(screenWidth, screenHeight);
-    
-
-    background = LoadTextureFromFile("Assets/GrassBackground.png", nullptr, nullptr);
-
-    font = TTF_OpenFont("Assets/OpenSans.ttf", FONT_SIZE);
-    
+    EmscriptenFullscreenStrategy fsStrat;
+    fsStrat.scaleMode = EMSCRIPTEN_FULLSCREEN_SCALE();
+    fsStrat.canvasResolutionScaleMode = EMSCRIPTEN_FULLSCREEN_CANVAS_SCALE();
+    fsStrat.filteringMode = EMSCRIPTEN_FULLSCREEN_FILTERING_DEFAULT;
+    fsStrat.canvasResizedCallback = nullptr;
+    fsStrat.canvasResizedCallbackUserData = nullptr;
+    emscripten_request_fullscreen_strategy("#canvas", true, &fsStrat);
+}
+void SetScreenSizedElements()
+{
     retryRect.x = screenWidth / 2 - 50;
     retryRect.y = 150;
     retryRect.w = 100;
@@ -1437,14 +1431,108 @@ int main()
     healthBar.y = 25;
     healthBar.w = 200;
     healthBar.h = 24;
+    userInput->SetMobileCircles(screenWidth, screenHeight);
+
+    if(entList.player)
+    {
+        int px = entList.player->centerX;
+        int py = entList.player->centerY;
+
+    }
+
+}
+EM_BOOL TouchStartCB(int eventType, const EmscriptenTouchEvent* ev, void* userData)
+{
+    SetFullScreen();
+    if(canRetry)
+    {
+        for(int i = 0; i < ev->numTouches; i++)
+        {
+            auto p = ev->touches[i];
+            if(retryRect.x < p.pageX && p.pageX < retryRect.w + retryRect.x && retryRect.y < p.pageY && p.pageY < retryRect.h + retryRect.y)
+            {
+                entList.Recreate();
+            }
+        }
+    }
+    else
+    {
+        userInput->TouchButtonSetState(ev, true, false);
+    }
+    return true;
+}
+EM_BOOL TouchEndCB(int eventType, const EmscriptenTouchEvent* ev, void* userData)
+{
+    userInput->TouchButtonSetState(ev, false, false);
+    return true;
+}
+EM_BOOL TouchMoveCB(int eventType, const EmscriptenTouchEvent* ev, void* userData)
+{
+    userInput->TouchButtonSetState(ev, true, true);
+    return true;
+}
+EM_BOOL MousePressCB(int eventType, const EmscriptenMouseEvent* ev, void* userData)
+{
+    if(canRetry)
+    {
+        if(retryRect.x < ev->targetX && ev->targetX < retryRect.w + retryRect.x && retryRect.y < ev->targetY && ev->targetY < retryRect.h + retryRect.y)
+        {
+            entList.Recreate();
+        }
+    }
+    else
+    {
+        userInput->MouseButtonSetState(ev, true);
+    }
+    return true;
+}
+EM_BOOL MouseReleaseCB(int eventType, const EmscriptenMouseEvent* ev, void* userData)
+{
+    userInput->MouseButtonSetState(ev, false);
+    return true;
+}
+EM_BOOL CanvasResizeCB(int eventType, const EmscriptenUiEvent* uiEvent, void* userData)
+{
+    double css_width; double css_height;
+    emscripten_get_element_css_size("canvas", &css_width, &css_height);
+    screenWidth = css_width; screenHeight = css_height;
+    SDL_SetWindowSize(window, screenWidth, screenHeight);
+    SetScreenSizedElements();
+    return true;
+}
+EM_BOOL FullscreenChangeCB(int eventType, const EmscriptenFullscreenChangeEvent* fullscreenChangeEvent, void *userData)
+{
+
+    isFullscreen = fullscreenChangeEvent->isFullscreen;
+    return true;
+}
+
+
+int main()
+{
+    double css_width; double css_height;
+    emscripten_get_element_css_size("#canvas", &css_width, &css_height);
+    screenWidth = css_width; screenHeight = css_height;
+
+    SDL_Init(SDL_INIT_EVERYTHING);
+    TTF_Init();
+
+    SDL_CreateWindowAndRenderer(screenWidth, screenHeight, 0, &window, &renderer);
+    userInput = new Input();
+
+
+    background = LoadTextureFromFile("Assets/GrassBackground.png", nullptr, nullptr);
+
+    font = TTF_OpenFont("Assets/OpenSans.ttf", FONT_SIZE);
     
+    SetScreenSizedElements();
+
     MainCharacter mainInfoStackVar;
     SkeletonEnemy skelInfoStackVar;
     DeathBossEnemy deathBossInfoStackVar;
     mainInfo = &mainInfoStackVar;
     skelInfo = &skelInfoStackVar;
     deathBossInfo = &deathBossInfoStackVar;
-
 
     SDL_SetRenderDrawBlendMode(renderer, SDL_BlendMode::SDL_BLENDMODE_BLEND);
 
@@ -1457,8 +1545,11 @@ int main()
     emscripten_set_mouseup_callback("#canvas", nullptr, true, MouseReleaseCB);
 
 
-    entList.Recreate();
+    emscripten_set_resize_callback(EMSCRIPTEN_EVENT_TARGET_WINDOW, nullptr, true, CanvasResizeCB);
+    emscripten_set_fullscreenchange_callback("#canvas", nullptr, true, FullscreenChangeCB);
 
+
+    entList.Recreate();
 
     emscripten_set_main_loop(MainLoop, 30, true);
 

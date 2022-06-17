@@ -3,7 +3,7 @@ project(WasmTest)
 set(CMAKE_CXX_STANDARD  20)
 
 
-if(EMSCRIPTEN)
+if(true)
     set(CMAKE_CXX_FLAGS "-s ASYNCIFY=1 -s USE_SDL=2 -s USE_SDL_TTF=2 -O2 --preload-file ../Assets/@Assets/")
 
     include_directories(D:/SDKs/emsdk/upstream/emscripten/cache/sysroot/include ${SDL2_INCLUDE_DIRS} ${FREETYPE_INCLUDE_DIRS})

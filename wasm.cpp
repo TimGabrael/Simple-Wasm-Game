@@ -11,18 +11,24 @@
 #include <string>
 #include <chrono>
 #include <sstream>
+#include <array>
 
 
+
+SDL_Rect CreateRect(int x, int y, int w, int h){ SDL_Rect rec; rec.x = x; rec.y = y; rec.w = w; rec.h = h; return rec; }
 
 
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
 
-#define PRESS_SPEED 10
-#define DIAG_SPEED 7
-#define ENEMY_SPEED 4
 static constexpr uint8_t U8_INVALID = -1;
+static constexpr uint16_t U16_INVALID = -1;
+static constexpr float INV_SQRT_2 = 0.70710678118f;
+
+
 #define FONT_SIZE 24
+static constexpr bool DRAW_DEBUG = false;
+static constexpr bool DRAW_FPS = false;
 
 SDL_Window *window;
 SDL_Renderer *renderer;
@@ -30,9 +36,9 @@ SDL_Texture* background;
 TTF_Font* font;
 
 struct Entity;
-struct MainCharacter; struct SkeletonEnemy; struct DeathBossEnemy;
-struct Animation;
-enum class ENT_TYPES : uint8_t
+struct MainCharacterInfo; struct SkeletonInfo; struct DeathBossInfo;
+struct Animation; struct AttackInfo; struct BasicEnemyInfo; struct EntityInfo;
+enum class ENT_TYPES : uint16_t
 {
     PLAYER,
     SKELETON,
@@ -47,11 +53,8 @@ enum ENT_FLAGS : uint8_t
     CLEAN_UP = 8,           // will be removed at the end of the frame
     SPRITE_INVERSE = 16,    // set if the entity has a inverse sprite layout
     COMBO_ATTACK_AV = 32,   // set if combo attack is available
+    IS_PLAYER = 64,
 };
-Animation* GetAnimationFromType(ENT_TYPES typ);
-SDL_Rect* GetAttackHitboxFromType(ENT_TYPES typ);
-SDL_Rect GetHitBoxFromType(ENT_TYPES typ);
-SDL_Rect GetAttackHitboxFromEntity(Entity* ent, int atkId);
 void SetDirection(Entity* ent);
 void SetFullScreen();
 
@@ -67,15 +70,18 @@ struct Entity
         moveX = 0; moveY = 0; frameIdx = 0;
         typeID = type; flags = flag;
     }
-    int health = 100;   // 100 is default health
+    float health = 100.0f;   // 100.0f is default health
     int16_t centerX = 0;
     int16_t centerY = 0;
     int16_t moveX = 0;
     int16_t moveY = 0;
+    ENT_TYPES typeID = ENT_TYPES::SKELETON;
+    uint16_t multipurposeCounter = 0;
+    uint8_t comboIdx = 0;
     uint8_t frameIdx = 0;
     uint8_t activeAnim = 0;
-    ENT_TYPES typeID = ENT_TYPES::SKELETON;
     uint8_t flags = ENT_FLAGS::LOOK_RIGHT;
+
 
     void MoveEntity()
     {
@@ -98,12 +104,16 @@ struct Entity
     {
         flags ^= flag;
     }
-    bool CanMove();
-    bool AnimIsAttack();
-    void Attack(int attackAnimID);
-    SDL_Rect GetHitbox();
-    void TakeDmg(int dmg, int hitAnim, int deathAnim);
-    void Draw();
+    bool CanMove(const EntityInfo* info);
+    bool AnimIsAttack(const EntityInfo* info);
+    void Attack(const EntityInfo* info, int atkID);
+
+    const EntityInfo* GetEntityInfo();
+    SDL_Rect GetHitBox(const EntityInfo* info);
+
+    void TakeDmg(const EntityInfo* info,  const AttackInfo* atkInfo);
+    void Draw(const EntityInfo* info);
+    static Entity Create(int cx, int cy, ENT_TYPES type, bool player);
 };
 struct EntityList
 {
@@ -137,14 +147,11 @@ struct EntityList
     void AddRandomEnemy();
 };
 static EntityList entList;
-static MainCharacter* mainInfo;
-static SkeletonEnemy* skelInfo;
-static DeathBossEnemy* deathBossInfo;
 static SDL_Rect retryRect;
 static SDL_Rect healthBar;
 static bool canRetry = false;
 static bool isFullscreen = false;
-static float scale = 2.0f;
+static float WORLD_SCALE = 2.0f;
 static int currentScore = 0;
 static float currentTime = 0;
 static int areaStartX = 0;
@@ -152,8 +159,6 @@ static int areaStartY = 0;
 static int screenWidth = 0;
 static int screenHeight = 0;
 static int g_gameStateCounter = 0;
-static constexpr bool DRAW_DEBUG = false;
-static constexpr bool DRAW_FPS = false;
 
 
 
@@ -397,7 +402,7 @@ struct Input
         }
         return false;
     }
-    void GetMoveXY(int16_t& moveX, int16_t& moveY)
+    void GetMoveXY(float movementSpeed, int16_t& moveX, int16_t& moveY)
     {
         if(moveCircleIdx == -1)
         {
@@ -406,29 +411,30 @@ struct Input
                 moveY = 0;
             }
             else if(IsPressed(Input::BTN_UP)){
-                moveY = -PRESS_SPEED;
+                moveY = -movementSpeed;
             }
             else if(IsPressed(Input::BTN_DOWN))
             {
-                moveY = PRESS_SPEED;
+                moveY = movementSpeed;
             }
             if(IsPressed(Input::BTN_LEFT) == IsPressed(Input::BTN_RIGHT))
             {
                 moveX = 0;
             }
             else if(IsPressed(Input::BTN_LEFT)){
-                moveX = -PRESS_SPEED;
+                moveX = -movementSpeed;
             }
             else if(IsPressed(Input::BTN_RIGHT))
             {
-                moveX = PRESS_SPEED;
+                moveX = movementSpeed;
             }
             if(moveX && moveY)
             {
-                if(moveX < 0) moveX = -DIAG_SPEED;
-                else moveX = DIAG_SPEED;
-                if(moveY < 0) moveY = -DIAG_SPEED;
-                else moveY = DIAG_SPEED;
+                int diagMov = (int)(movementSpeed * INV_SQRT_2 + 0.5f);
+                if(moveX < 0) moveX = -diagMov;
+                else moveX = diagMov;
+                if(moveY < 0) moveY = -diagMov;
+                else moveY = diagMov;
             }
         }
         else
@@ -442,12 +448,15 @@ struct Input
             if(dist > frad){
                 dist = frad;
             }
-            dx *= (dist / frad) * PRESS_SPEED; dy *= (dist / frad) * PRESS_SPEED;
-            if(abs(dx) > 1.0){
-                moveX = dx;
+            dx *= (dist / frad) * movementSpeed; dy *= (dist / frad) * movementSpeed;
+
+            if(abs(dx) > 0.5){
+                if(dx < 0.0f) moveX = dx - 0.5f;
+                else moveX = dx + 0.5f;
             }
-            if(abs(dy) > 1.0){
-                moveY = dy;
+            if(abs(dy) > 0.5){
+                if(dy < 0.0f) moveY = dy - 0.5f;
+                else moveY = dy + 0.5f;
             }
 
         }
@@ -528,8 +537,30 @@ SDL_Texture* LoadTextureFromFile(const char* filename, int* outx, int* outy)
 }
 
 
+struct AnimationCreationData
+{
+    const char* filename = nullptr;
+    int nFrames = 0;
+    int numInColumn = 0;
+};
+struct BasicEntityInfo
+{
+    float maxHealth;
+    float movementSpeed;
+    int corpseDuration; // num frames that the corpse anim is shown if (corpseDuration == 0 or corpseAnim == U8_INVALID) -> deathAnim last frame gets shown forever
+    int maxAttackCombo; // number of attacks that can be 
+    uint8_t idleAnim;
+    uint8_t walkAnim;
+    uint8_t deathAnim;
+    uint8_t hitAnim;
+    uint8_t corpseAnim; // animation of the corpse
+    bool spriteLooksLeft;
+    bool canMoveWhileHit;
+    static constexpr uint16_t comboTimeFrame = 3;   // number of animation changes until a combo attack is no longer possible
+};
 struct Animation
 {
+    Animation() {}
     Animation(const char* filename, int nFrames, int numInColumn)
     {
         offsetX = 0;
@@ -547,8 +578,8 @@ struct Animation
         frameIdx = frameIdx % numFrames;
         int offX = toRight ? -offsetX : offsetX;
         SDL_Rect src= GetRectFromIdx(frameIdx);
-        SDL_Rect dst = src; dst.x += cx - src.x - (sx/2 + offX) * scale; dst.y += cy - (sy/2 + offsetY) * scale;
-        dst.w *= scale; dst.h *= scale;
+        SDL_Rect dst = src; dst.x += cx - src.x - (sx/2 + offX) * WORLD_SCALE; dst.y += cy - (sy/2 + offsetY) * WORLD_SCALE;
+        dst.w *= WORLD_SCALE; dst.h *= WORLD_SCALE;
         
         int res = SDL_RenderCopyEx(renderer, animTex, &src, &dst, 0.0, nullptr, toRight ? SDL_RendererFlip::SDL_FLIP_NONE : SDL_RendererFlip::SDL_FLIP_HORIZONTAL);
         if(res < 0)
@@ -578,12 +609,52 @@ private:
     int16_t offsetX; int16_t offsetY;
     int16_t sx; int16_t sy;
 };
-void PlayerHitCallback(Entity* player, Entity* hitter, int atkIdx);
-void EnemyHitCallback(Entity* enemy, Entity* player, int atkIdx);
+struct AttackInfo
+{
+    AttackInfo() {};
+    SDL_Rect AtkRect;
+    int startDmgframe;
+    int duration;
+    float damage;
+    bool canMove;
+    bool friendlyFire;
+    uint8_t animID;
+    SDL_Rect GetHitBox(Entity* ent);
+};
+struct BasicEnemyInfo
+{
+    BasicEnemyInfo(){}
+    float attackRadius;
+    float moveRadius;
+    int removeIdx;  // num updates to wait until corpse is removed
+};
+void PlayerHitCallback(Entity* player, Entity* hitter, const AttackInfo* atkInfo);
+void EnemyHitCallback(Entity* enemy, Entity* player, const AttackInfo* atkInfo);
 
 
 
-struct MainCharacter
+struct EntityInfo
+{  
+    template<int nAnims>
+    void SetAnims(const std::array<AnimationCreationData, nAnims>& Animations){
+        if(anims) delete[] anims;
+        this->numAnims = nAnims;
+        anims = new Animation[nAnims];
+        for(int i = 0; i < nAnims; i++) {
+            auto& cAnim = Animations.at(i);
+            anims[i] = Animation(cAnim.filename, cAnim.nFrames, cAnim.numInColumn);
+        }
+    }
+    SDL_Rect HitBox;
+    int numAttacks = 0;
+    int numAnims = 0;
+    AttackInfo* atks = nullptr;
+    Animation* anims = nullptr;
+    BasicEntityInfo baseInfo;
+    BasicEnemyInfo enemyInfo;
+};
+static EntityInfo infoList[(size_t)ENT_TYPES::NUM_TYPES];
+struct MainCharacterInfo : public EntityInfo
 {
     enum CharAnims : uint8_t
     {
@@ -600,36 +671,40 @@ struct MainCharacter
         TakeHit,
         NUM_ANIMATIONS,
     };
-    MainCharacter() : anims{{"Assets/MainChar/Attack1.png", 4, 4}, 
-    {"Assets/MainChar/Attack2.png", 4, 4}, 
-    {"Assets/MainChar/Attack3.png", 4, 4}, 
-    {"Assets/MainChar/Attack4.png", 4, 4},
-    {"Assets/MainChar/Death.png", 6, 6}, 
-    {"Assets/MainChar/Fall.png", 2, 2}, 
-    {"Assets/MainChar/Idle.png", 8, 8}, 
-    {"Assets/MainChar/Jump.png", 2, 2}, 
-    {"Assets/MainChar/Run.png", 8, 8}, 
-    {"Assets/MainChar/Take Hit - white silhouette.png", 4, 4}, 
-    {"Assets/MainChar/Take Hit.png", 4, 4}}
+    MainCharacterInfo()
     {
-        AtkRects[0].x = 0; AtkRects[0].y = -20 * scale; AtkRects[0].w = 50 * scale; AtkRects[0].h = 40 * scale;
-        AtkRects[1].x = 0; AtkRects[1].y = -60 * scale + hboxH / 2 * scale; AtkRects[1].w = 70 * scale; AtkRects[1].h = 60 * scale;
-        AtkRects[2].x = -hboxW * scale; AtkRects[2].y = -5 * scale; AtkRects[2].w = 80 * scale; AtkRects[2].h = 10 * scale;
-        AtkRects[3].x = 0; AtkRects[3].y = -60 * scale + hboxH / 2 * scale; AtkRects[3].w = 70 * scale; AtkRects[3].h = 60 * scale;
+        SetAnims<CharAnims::NUM_ANIMATIONS>(_animData);
+        numAttacks = 4; atks = new AttackInfo[numAttacks];
+        
+        auto& a1 = atks[0]; a1.animID = Attack1; a1.AtkRect = CreateRect(0, -20 * WORLD_SCALE, 50 * WORLD_SCALE, 40 * WORLD_SCALE); a1.damage = 20.0f; a1.duration = 1; a1.startDmgframe = 3; a1.canMove = false; a1.friendlyFire = false;
+        auto& a2 = atks[1]; a2.animID = Attack2; a2.AtkRect = CreateRect(0, -60 * WORLD_SCALE + hboxH / 2 * WORLD_SCALE, 70 * WORLD_SCALE, 50 * WORLD_SCALE); a2.damage = 20.0f; a2.duration = 1; a2.startDmgframe = 3; a2.canMove = false; a2.friendlyFire = false;
+        auto& a3 = atks[2]; a3.animID = Attack3; a3.AtkRect = CreateRect(-hboxW * WORLD_SCALE, -5 * WORLD_SCALE, 80 * WORLD_SCALE, 10 * WORLD_SCALE); a3.damage = 20.0f; a3.duration = 1; a3.startDmgframe = 3; a3.canMove = false; a3.friendlyFire = false;
+        auto& a4 = atks[3]; a4.animID = Attack4; a4.AtkRect = CreateRect(0, -60* WORLD_SCALE + hboxH / 2 * WORLD_SCALE, 70 * WORLD_SCALE, 60 * WORLD_SCALE); a4.damage = 20.0f; a4.duration = 1; a4.startDmgframe = 3; a4.canMove = false; a4.friendlyFire = false;
 
-        HitBox.x = hboxW/2 * scale; HitBox.y = hboxH/2 * scale;
-        HitBox.w = hboxW * scale; HitBox.h = hboxH * scale;
+        baseInfo.maxHealth = 100.0f; baseInfo.movementSpeed = 6.0f * WORLD_SCALE; baseInfo.corpseDuration = 0; baseInfo.deathAnim = Death; baseInfo.idleAnim = Idle; baseInfo.walkAnim = Run; baseInfo.corpseAnim = U8_INVALID; baseInfo.spriteLooksLeft = false;
+        baseInfo.maxAttackCombo = 2; baseInfo.hitAnim = TakeHitSilhoutte; baseInfo.canMoveWhileHit = true;
+        HitBox.x = hboxW/2 * WORLD_SCALE; HitBox.y = hboxH/2 * WORLD_SCALE;
+        HitBox.w = hboxW * WORLD_SCALE; HitBox.h = hboxH * WORLD_SCALE;
     }
     
 
+
+private:
     static constexpr int hboxW = 20;
     static constexpr int hboxH = 40;
-
-    SDL_Rect HitBox;
-    SDL_Rect AtkRects[4];
-    Animation anims[NUM_ANIMATIONS];
+    static constexpr std::array<AnimationCreationData, NUM_ANIMATIONS> _animData = {{ {"Assets/MainChar/Attack1.png", 4, 4},
+                     {"Assets/MainChar/Attack2.png", 4, 4},
+                     {"Assets/MainChar/Attack3.png", 4, 4},
+                     {"Assets/MainChar/Attack4.png", 4, 4},
+                     {"Assets/MainChar/Death.png", 6, 6},
+                     {"Assets/MainChar/Fall.png", 2, 2},
+                     {"Assets/MainChar/Idle.png", 8, 8},
+                     {"Assets/MainChar/Jump.png", 2, 2},
+                     {"Assets/MainChar/Run.png", 8, 8},
+                     {"Assets/MainChar/Take Hit - white silhouette.png", 4, 4},
+                     {"Assets/MainChar/Take Hit.png", 4, 4} }};
 };
-struct SkeletonEnemy
+struct SkeletonInfo : public EntityInfo
 {
     enum SkeletonAnims
     {
@@ -646,7 +721,31 @@ struct SkeletonEnemy
         Walk,
         NUM_ANIMATIONS,
     };
-    SkeletonEnemy() : anims{
+    SkeletonInfo()
+    {
+        SetAnims<SkeletonAnims::NUM_ANIMATIONS>(_animData);
+
+        numAttacks = 2; atks = new AttackInfo[numAttacks];
+        auto& a1 = atks[0]; a1.animID = Attack1; a1.AtkRect = CreateRect(-hboxW / 2 * WORLD_SCALE - 5 * WORLD_SCALE, -20 * WORLD_SCALE, 50 * WORLD_SCALE, 40 * WORLD_SCALE); a1.damage = 10.0f; a1.duration = 1; a1.startDmgframe = 3; a1.canMove = false; a1.friendlyFire = false;
+        auto& a2 = atks[1]; a2.animID = Attack2; a2.AtkRect = CreateRect(-hboxW / 2 * WORLD_SCALE - 5 * WORLD_SCALE, -20 * WORLD_SCALE, 50 * WORLD_SCALE, 40 * WORLD_SCALE); a2.damage = 10.0f; a2.duration = 1; a2.startDmgframe = 3; a2.canMove = false; a2.friendlyFire = false;
+        
+        anims[0].SetOffset(10,10); anims[1].SetOffset(10,10);
+
+        baseInfo.corpseDuration = 10; baseInfo.deathAnim = DeadFar; baseInfo.idleAnim = Ready; baseInfo.maxHealth = 40.0f; baseInfo.movementSpeed = 2.0f * WORLD_SCALE; baseInfo.walkAnim = Run; baseInfo.corpseAnim = Corpse; baseInfo.spriteLooksLeft = false;
+        baseInfo.maxAttackCombo = 1; baseInfo.hitAnim = Hit; baseInfo.canMoveWhileHit = false;
+        enemyInfo.attackRadius = 30.0f * WORLD_SCALE; enemyInfo.moveRadius = 20.0f * WORLD_SCALE; enemyInfo.removeIdx = 10;
+
+        HitBox.x = hboxW / 2 * WORLD_SCALE; HitBox.y = hboxH / 2 * WORLD_SCALE;
+        HitBox.w = hboxW * WORLD_SCALE; HitBox.h = hboxH * WORLD_SCALE;
+    }
+
+
+
+private:
+    static constexpr int attackOffset = 10;
+    static constexpr int hboxW = 20;
+    static constexpr int hboxH = 40;
+    static constexpr std::array<AnimationCreationData, NUM_ANIMATIONS> _animData = {{
         {"Assets/Skeleton/attack1.png", 6, 6},
         {"Assets/Skeleton/attack2.png", 6, 6},
         {"Assets/Skeleton/corpse.png", 2, 2},
@@ -658,29 +757,11 @@ struct SkeletonEnemy
         {"Assets/Skeleton/reborn.png", 3, 3},
         {"Assets/Skeleton/run.png", 6, 6},
         {"Assets/Skeleton/walk.png", 6, 6},
-    }
-    {
-        anims[0].SetOffset(10,10); anims[1].SetOffset(10,10);
-        AtkRects[0].x = -hboxW / 2 * scale - 5 * scale; AtkRects[0].y = -20 * scale; AtkRects[0].w = 50 * scale; AtkRects[0].h = 40 * scale;
-        AtkRects[1].x = -hboxW / 2 * scale - 5 * scale; AtkRects[1].y = -20 * scale; AtkRects[1].w = 50 * scale; AtkRects[1].h = 40 * scale;
-
-
-        HitBox.x = hboxW / 2 * scale; HitBox.y = hboxH / 2 * scale;
-        HitBox.w = hboxW * scale; HitBox.h = hboxH * scale;
-    }
-
-
-    static constexpr int attackOffset = 10;
-    static constexpr int hboxW = 20;
-    static constexpr int hboxH = 40;
-
-    SDL_Rect HitBox;
-    SDL_Rect AtkRects[2];
-    Animation anims[NUM_ANIMATIONS];
+    }};
 };
 
 
-struct DeathBossEnemy
+struct DeathBossInfo : public EntityInfo
 {
     enum DeathBossAnims
     {
@@ -693,129 +774,40 @@ struct DeathBossEnemy
         Walk,
         NUM_ANIMATIONS,
     };
-    DeathBossEnemy() : anims{
+    DeathBossInfo()
+    {
+        SetAnims<DeathBossAnims::NUM_ANIMATIONS>(_animData);
+        for(int i = 0; i < DeathBossAnims::NUM_ANIMATIONS; i++) anims[i].SetOffset(-35, 20);
+
+        numAttacks = 2;
+        atks = new AttackInfo[numAttacks];
+        auto& a1 = atks[0]; a1.animID = Attack; a1.AtkRect = CreateRect(-hboxW/2*WORLD_SCALE-5*WORLD_SCALE,-70*WORLD_SCALE,120*WORLD_SCALE,100*WORLD_SCALE); a1.damage = 30.0f; a1.duration = 1; a1.startDmgframe = 8; a1.canMove = false; a1.friendlyFire = true;
+        auto& a2 = atks[1]; a2.animID = Cast; a2.AtkRect = CreateRect(0,0,0,0); a2.duration = 0; a2.startDmgframe = 0; a2.canMove = false; a2.friendlyFire = false;
+
+        baseInfo.corpseDuration = 0; baseInfo.deathAnim = Death; baseInfo.idleAnim = Idle; baseInfo.maxHealth = 100.0f; baseInfo.movementSpeed = 3.0f * WORLD_SCALE; baseInfo.walkAnim = Walk; baseInfo.corpseAnim = U8_INVALID; baseInfo.spriteLooksLeft = true;
+        baseInfo.maxAttackCombo = 1; baseInfo.hitAnim = Hurt; baseInfo.canMoveWhileHit = true;
+        enemyInfo.attackRadius = 75.0f * WORLD_SCALE; enemyInfo.moveRadius = 30.0f * WORLD_SCALE; enemyInfo.removeIdx = 0;
+
+        HitBox.x = hboxW / 2 * WORLD_SCALE; HitBox.y = hboxH / 2 * WORLD_SCALE;
+        HitBox.w = hboxW * WORLD_SCALE; HitBox.h = hboxH * WORLD_SCALE;
+    }
+
+private:
+    static constexpr int hboxW = 30;
+    static constexpr int hboxH = 60;
+
+    static constexpr std::array<AnimationCreationData, NUM_ANIMATIONS> _animData = {{
         {"Assets/Death-Boss/Attack.png", 10, 10},
         {"Assets/Death-Boss/Cast.png", 9, 9},
         {"Assets/Death-Boss/Death.png", 10, 10},
         {"Assets/Death-Boss/Hurt.png", 3, 3},
         {"Assets/Death-Boss/Idle.png", 8, 8},
         {"Assets/Death-Boss/Spell.png", 16, 16},
-        {"Assets/Death-Boss/Walk.png", 8, 8},
-    }
-    {
-        anims[0].SetOffset(-35, 20);
-        anims[1].SetOffset(-35, 20);
-        anims[2].SetOffset(-35, 20);
-        anims[3].SetOffset(-35, 20);
-        anims[4].SetOffset(-35, 20);
-        anims[5].SetOffset(-35, 20);
-        anims[6].SetOffset(-35, 20);
-        AtkRects[0].x = -hboxW / 2 * scale - 5 * scale; AtkRects[0].y = -70 * scale; AtkRects[0].w = 120 * scale; AtkRects[0].h = 100 * scale;
-        AtkRects[1].x = -hboxW / 2 * scale - 5 * scale; AtkRects[1].y = -20 * scale; AtkRects[1].w = 50 * scale; AtkRects[1].h = 40 * scale;
-        HitBox.x = hboxW / 2 * scale; HitBox.y = hboxH / 2 * scale;
-        HitBox.w = hboxW * scale; HitBox.h = hboxH * scale;
-    }
-
-    static constexpr int hboxW = 30;
-    static constexpr int hboxH = 60;
-    SDL_Rect HitBox;
-    SDL_Rect AtkRects[2];
-    Animation anims[DeathBossAnims::NUM_ANIMATIONS];
+        {"Assets/Death-Boss/Walk.png", 8, 8}
+    }};
 };
 
 
-struct PlayerEntity : public Entity
-{
-    static Entity Create(int cx, int cy) {
-        Entity res(cx, cy, 100, (int)MainCharacter::Idle, ENT_TYPES::PLAYER, (uint8_t)(ENT_FLAGS::LOOK_RIGHT));
-        return res;
-    }
-};
-struct SkeletonEntity : public Entity
-{
-    static Entity Create(int cx, int cy) {
-        Entity res(cx, cy, 100, (int)SkeletonEnemy::Ready, ENT_TYPES::SKELETON, (uint8_t)(ENT_FLAGS::LOOK_RIGHT));
-        return res;
-    }
-};
-struct DeathBossEntity : public Entity
-{
-    static Entity Create(int cx, int cy){
-        Entity res(cx, cy, 100, (int)DeathBossEnemy::Idle, ENT_TYPES::DEATH_BOSS, (uint8_t)(ENT_FLAGS::LOOK_RIGHT | ENT_FLAGS::SPRITE_INVERSE));
-        return res;
-    }
-};
-
-
-
-Animation* GetAnimationFromType(ENT_TYPES typ)
-{
-    switch(typ)
-    {
-    case ENT_TYPES::PLAYER: return mainInfo->anims;
-    case ENT_TYPES::SKELETON: return skelInfo->anims;
-    case ENT_TYPES::DEATH_BOSS: return deathBossInfo->anims;
-    default:
-        break;
-    }
-    return nullptr;
-}
-SDL_Rect* GetAttackHitboxFromType(ENT_TYPES typ)
-{
-    switch(typ)
-    {
-    case ENT_TYPES::PLAYER: return mainInfo->AtkRects;
-    case ENT_TYPES::SKELETON: return skelInfo->AtkRects;
-    case ENT_TYPES::DEATH_BOSS: return deathBossInfo->AtkRects;
-    default:
-        break;
-    }
-    return nullptr;
-}
-SDL_Rect GetHitBoxFromType(ENT_TYPES typ)
-{
-    SDL_Rect result;result.x = 0; result.y = 0; result.w = 0; result.h = 0;
-    switch(typ)
-    {
-    case ENT_TYPES::PLAYER: 
-        result = mainInfo->HitBox;
-        break;
-    case ENT_TYPES::SKELETON: 
-        result = skelInfo->HitBox;
-        break;
-    case ENT_TYPES::DEATH_BOSS: 
-        result = deathBossInfo->HitBox;
-        break;
-    default:
-        break;
-    }
-    return result;
-}
-SDL_Rect GetAttackHitboxFromEntity(Entity* ent, int atkId)
-{
-    SDL_Rect* av = GetAttackHitboxFromType(ent->typeID);
-    SDL_Rect result;result.x=0;result.y=0;result.w=0;result.h=0;
-    if(av && atkId >= 0)
-    {
-        result = av[atkId];
-        if(ent->flags & ENT_FLAGS::SPRITE_INVERSE)
-        {
-            if(ent->ToRight())
-            {
-                result.x = -result.x - result.w;
-            }
-        }
-        else
-        {
-            if(!ent->ToRight())
-            {
-                result.x = -result.x - result.w;
-            }
-        }
-        result.x += ent->centerX; result.y += ent->centerY;
-    }
-    return result;
-}
 void SetDirection(Entity* ent)
 {
 
@@ -830,17 +822,17 @@ void SetDirection(Entity* ent)
     }
 }
 
-void HitTestAllEnemys(Entity* source, int atkID, const SDL_Rect& hitRec)
+void HitTestAll(Entity* source, const AttackInfo* atkInfo, const SDL_Rect& hitRec) // doesn't hit source
 {
     for(int i = 0; i < entList.vec.size(); i++)
     {
-        if(entList.player == &entList.vec.at(i)) continue;
+        if(source == &entList.vec.at(i)) continue;
         Entity* hit = &entList.vec.at(i);
         if(hit->flags & ENT_FLAGS::DEAD) continue;
-        SDL_Rect enemyHBox = hit->GetHitbox();
+        SDL_Rect enemyHBox = hit->GetHitBox(hit->GetEntityInfo());
         if(RectangleCollisionTest(hitRec, enemyHBox))
         {
-            EnemyHitCallback(hit, source, atkID);
+            EnemyHitCallback(hit, source, atkInfo);
         }
     }
 }
@@ -856,13 +848,13 @@ void HitTestAllEnemys(Entity* source, int atkID, const SDL_Rect& hitRec)
 
 
 
-float GetMoveToPlayer(Entity* ent, float entSpeed)
+float GetMoveToPlayer(Entity* ent, const EntityInfo* info)
 {
     const int px = entList.player->centerX; const int py = entList.player->centerY;
 
     float dx = px - ent->centerX; float dy = py - ent->centerY;
     float dist = sqrtf(dx * dx + dy * dy);
-    if(dist < 60.0f) {
+    if(dist < info->enemyInfo.moveRadius) {
         ent->moveX = 0; ent->moveY = 0;
         return dist;
     }
@@ -870,8 +862,8 @@ float GetMoveToPlayer(Entity* ent, float entSpeed)
     float inv_dist = 1.0f / dist;
     dx *= inv_dist; dy *= inv_dist;
     
-    ent->moveX = dx * entSpeed;
-    ent->moveY = dy * entSpeed;
+    ent->moveX = dx * info->baseInfo.movementSpeed;
+    ent->moveY = dy * info->baseInfo.movementSpeed;
     return dist;
 }
 
@@ -883,185 +875,175 @@ float GetMoveToPlayer(Entity* ent, float entSpeed)
 
 
 
-
-
-
-
-void UpdatePlayer(Entity* playerEnt, int framecount)
+void HandleEntityDeathTick(Entity* ent, const EntityInfo* info, int frameCount)
 {
-    static int repeatAttackIdx = 0;
-    Animation* anims = mainInfo->anims;
-    if((framecount % 3) == 0)
+    if(!(ent->flags & ENT_FLAGS::IS_PLAYER))
     {
-        if(playerEnt->flags & ENT_FLAGS::DEAD) {
-            if(playerEnt->frameIdx != (uint8_t)(anims[MainCharacter::CharAnims::Death].numFrames-1))
-            {
-                playerEnt->frameIdx++;
-            }
+        int rmidx = info->enemyInfo.removeIdx + info->anims[info->baseInfo.deathAnim].numFrames;
+        if(rmidx <= ent->multipurposeCounter){
+            ent->SetFlag(ENT_FLAGS::CLEAN_UP);
+            entList._dirty = true;
         }
-        else{
-            playerEnt->frameIdx++;
-        }
-        if(playerEnt->activeAnim <= MainCharacter::Attack4 && playerEnt->frameIdx == anims[playerEnt->activeAnim].numFrames)
-        {
-            repeatAttackIdx = 0;
-            playerEnt->frameIdx = 0;
-            playerEnt->activeAnim = MainCharacter::CharAnims::Idle;
-            playerEnt->ClearFlag(ENT_FLAGS::HIT_CHECKED);
-            if(playerEnt->flags & ENT_FLAGS::COMBO_ATTACK_AV) playerEnt->ClearFlag(ENT_FLAGS::COMBO_ATTACK_AV);
-            else playerEnt->SetFlag(ENT_FLAGS::COMBO_ATTACK_AV);
-        }
-        if(playerEnt->activeAnim == MainCharacter::CharAnims::TakeHitSilhoutte && playerEnt->frameIdx == anims[MainCharacter::CharAnims::TakeHitSilhoutte].numFrames)
-        {
-            playerEnt->frameIdx = 0;
-            playerEnt->activeAnim = MainCharacter::CharAnims::Idle;
-        }
-        if(playerEnt->activeAnim > MainCharacter::Attack4 && playerEnt->flags & ENT_FLAGS::COMBO_ATTACK_AV) {
-            repeatAttackIdx++;
-        }
-        if(repeatAttackIdx > 5)
-        {
-            playerEnt->ClearFlag(ENT_FLAGS::COMBO_ATTACK_AV);
-            repeatAttackIdx = 0;
-        }
+        ent->multipurposeCounter++;   // cleanup counter
     }
-    userInput->GetMoveXY(playerEnt->moveX, playerEnt->moveY);
-    if(playerEnt->flags & ENT_FLAGS::DEAD){
-        playerEnt->activeAnim = MainCharacter::CharAnims::Death;
-        playerEnt->moveX = 0; playerEnt->moveY = 0;
-        return;
-    }
-
-    if(userInput->attackStates[0]){
-        playerEnt->Attack(playerEnt->flags & ENT_FLAGS::COMBO_ATTACK_AV ? 1 : 0);
-    }
-    else if(userInput->attackStates[1]) {
-        playerEnt->Attack(playerEnt->flags & ENT_FLAGS::COMBO_ATTACK_AV ? 3 : 2);
-    }
-    if(playerEnt->activeAnim <= MainCharacter::Attack4) // animation is attack
+}
+void HandleEntityMoveAndAttack(Entity* ent, const EntityInfo* info, int frameCount)
+{
+    if(ent->flags & ENT_FLAGS::IS_PLAYER)
     {
-        playerEnt->moveX = 0; playerEnt->moveY = 0;
-        if(playerEnt->frameIdx == 3){
-            SDL_Rect atkRect = GetAttackHitboxFromEntity(playerEnt, playerEnt->activeAnim);
-            if(DRAW_DEBUG)
-            {
-                SDL_SetRenderDrawColor(renderer, 255, 0, 255, 255);
-                SDL_RenderDrawRect(renderer, &atkRect);
-            }
-            if(!(playerEnt->flags & ENT_FLAGS::HIT_CHECKED))
-            {
-                HitTestAllEnemys(playerEnt, playerEnt->activeAnim, atkRect);
-            }
-            playerEnt->SetFlag(ENT_FLAGS::HIT_CHECKED);
+        userInput->GetMoveXY(info->baseInfo.movementSpeed, ent->moveX, ent->moveY);
+        if(userInput->attackStates[0]){
+            ent->Attack(info , ent->comboIdx);
+        }
+        else if(userInput->attackStates[1]) {
+            ent->Attack(info, ent->comboIdx + 2);
         }
     }
-    else
-    {
-        SetDirection(playerEnt);
-        if(playerEnt->activeAnim == MainCharacter::Idle)
+    else{
+        float distance = GetMoveToPlayer(ent, info);
+        if(distance < info->enemyInfo.attackRadius)
         {
-            if(!(playerEnt->moveX == 0 && playerEnt->moveY == 0))
+            int atkRand = rand() % 8;
+            if(atkRand == 0)
             {
-                playerEnt->activeAnim = MainCharacter::CharAnims::Run;
-            }
-        }
-        else if(playerEnt->activeAnim == MainCharacter::Run && (playerEnt->moveX == 0 && playerEnt->moveY == 0))
-        {
-            playerEnt->activeAnim = MainCharacter::Idle;
+                ent->Attack(info, 0);
+            }   
         }
     }
-    playerEnt->MoveEntity();
 }
 
-void UpdateEnemy(Entity* ent, int framecount, int DeathAnim, int AttackAnim, int idleAnim, int runAnim)
+void UpdateEntity(Entity* ent, int frameCount)
 {
-    Animation* anims = GetAnimationFromType(ent->typeID);
-    if((framecount % 3) == 0)
+    const EntityInfo* info = ent->GetEntityInfo();
+    if((frameCount % 3) == 0)   // new animation frame
     {
-        if(ent->flags & ENT_FLAGS::DEAD) {
-            ent->activeAnim = DeathAnim;
-            if(ent->frameIdx != (uint8_t)(anims[DeathAnim].numFrames-1))
+        if(ent->flags & ENT_FLAGS::DEAD)
+        {
+            if(ent->activeAnim == info->baseInfo.deathAnim && info->baseInfo.deathAnim != U8_INVALID)
             {
-                ent->frameIdx++;
-                ent->moveX = 0; // moveX gets used upon death to clean up the entity
+                if(ent->frameIdx != (uint8_t)(info->anims[info->baseInfo.deathAnim].numFrames-1))
+                {
+                    ent->frameIdx++;
+                }
+                else if(info->baseInfo.corpseAnim != U8_INVALID && info->baseInfo.corpseDuration != 0)
+                {
+                    ent->activeAnim = info->baseInfo.corpseAnim;
+                }
+            }
+            HandleEntityDeathTick(ent, info, frameCount);
+            return;
+        }
+        else
+        {
+            ent->frameIdx++;
+        }
+        ent->ClearFlag(ENT_FLAGS::HIT_CHECKED);
+        if(ent->AnimIsAttack(info) && ent->frameIdx == info->anims[ent->activeAnim].numFrames)
+        {
+            ent->frameIdx = 0; ent->activeAnim = info->baseInfo.idleAnim;
+            ent->SetFlag(ENT_FLAGS::COMBO_ATTACK_AV);
+        }
+        else if(ent->flags & ENT_FLAGS::COMBO_ATTACK_AV)
+        {
+            if(info->baseInfo.comboTimeFrame <= ent->multipurposeCounter)
+            {
+                ent->multipurposeCounter = 0; ent->comboIdx = 0;
+                ent->ClearFlag(ENT_FLAGS::COMBO_ATTACK_AV);
             }
             else
             {
-                ent->moveX++;
-                if(ent->moveX > 10)
-                {
-                    entList._dirty = true;
-                    ent->SetFlag(ENT_FLAGS::CLEAN_UP);
-                }
-                return;
+                ent->multipurposeCounter++;
             }
         }
-        else{
-            ent->frameIdx++;
-        }
-        if(ent && ent->frameIdx == anims[ent->activeAnim].numFrames)
+        if(info->baseInfo.hitAnim != U8_INVALID && ent->activeAnim == info->baseInfo.hitAnim && ent->frameIdx == info->anims[info->baseInfo.hitAnim].numFrames)
         {
-            ent->frameIdx = 0;
-            ent->activeAnim = idleAnim;
-            ent->ClearFlag(ENT_FLAGS::HIT_CHECKED);
+            ent->frameIdx = 0; ent->activeAnim = info->baseInfo.idleAnim;
         }
     }
-    if(ent->flags & ENT_FLAGS::DEAD) return;
+    if(ent->flags & ENT_FLAGS::DEAD) return;    // for whenever the framecount is not %3
+    HandleEntityMoveAndAttack(ent, info, frameCount);
 
-    float distance = GetMoveToPlayer(ent, 4.0f);
-    if(distance < 80.0f)
+    if(ent->AnimIsAttack(info))
     {
-        int atkRand = rand() % 20;
-        if(atkRand == 0)
+        AttackInfo* curAttack = nullptr;
+        for(int i = 0; i < info->numAttacks; i++)
         {
-            ent->Attack(AttackAnim);
-        }   
-    }
+            if(info->atks[i].animID == ent->activeAnim){
+                curAttack = &info->atks[i];
+                break;
+            }
+        }
+        if(curAttack)
+        {
+            SDL_Rect atkHitbox = curAttack->GetHitBox(ent);
+            SDL_Rect entHitbox = ent->GetHitBox(info);
 
-    if(ent->AnimIsAttack()) // animation is attack
-    {
-        ent->moveX = 0; ent->moveY = 0;
-        if(ent->frameIdx == 3){
-            SDL_Rect atkRect = GetAttackHitboxFromEntity(ent, ent->activeAnim);
             if(DRAW_DEBUG)
             {
-                SDL_SetRenderDrawColor(renderer, 255, 0, 255, 255);
-                SDL_RenderDrawRect(renderer, &atkRect);
+                SDL_SetRenderDrawColor(renderer, 255, 0, 0, 255);
             }
-            if(!(ent->flags & ENT_FLAGS::HIT_CHECKED))
-            {
-                SDL_Rect hbox = entList.player->GetHitbox();
-
-                if(RectangleCollisionTest(atkRect, hbox))
+            if(!curAttack->canMove){
+                ent->moveX = 0; ent->moveY = 0;
+            }
+            if(curAttack->startDmgframe <= ent->frameIdx && ent->frameIdx < curAttack->startDmgframe + curAttack->duration && !(ent->flags & ENT_FLAGS::HIT_CHECKED)){
+                if(DRAW_DEBUG)
                 {
-                    PlayerHitCallback(entList.player, ent, ent->activeAnim);
-                    ent->SetFlag(ENT_FLAGS::HIT_CHECKED);
+                    SDL_SetRenderDrawColor(renderer, 255, 0, 255, 255);
                 }
+                if(ent->flags & ENT_FLAGS::IS_PLAYER)
+                {
+                    HitTestAll(ent, curAttack, atkHitbox);
+                    if(curAttack->friendlyFire)
+                    {
+                        if(RectangleCollisionTest(entHitbox, atkHitbox))
+                        {
+                            PlayerHitCallback(ent, ent, curAttack);
+                        }
+                    }
+                }
+                else{
+                    const EntityInfo* playerInfo = entList.player->GetEntityInfo();
+                    SDL_Rect playerHitbox = entList.player->GetHitBox(playerInfo);
+                    if(RectangleCollisionTest(playerHitbox, atkHitbox))
+                    {
+                        PlayerHitCallback(entList.player, ent, curAttack);
+                    }
+                    if(curAttack->friendlyFire)
+                    {
+                        HitTestAll(ent, curAttack, atkHitbox);
+                    }
+                }
+                ent->SetFlag(ENT_FLAGS::HIT_CHECKED);
             }
+
+            if(DRAW_DEBUG)
+            {
+                SDL_RenderDrawRect(renderer, &atkHitbox);
+            }
+
         }
     }
     else
     {
-        if(!ent->CanMove()){
-            ent->moveX = 0; ent->moveY = 0;
-        }
-        if(ent->flags & ENT_FLAGS::DEAD){
-            ent->activeAnim = DeathAnim;
-            ent->moveX = 0; ent->moveY = 0;
-            return;
-        }
         SetDirection(ent);
-        if(ent->activeAnim == idleAnim){
-            if(!(ent->moveX == 0 && ent->moveY == 0))
+        if(ent->CanMove(info))
+        {
+            if(ent->activeAnim != info->baseInfo.hitAnim)
             {
-                ent->activeAnim = runAnim;
+                if(ent->moveX == 0 && ent->moveY == 0)
+                {
+                    ent->activeAnim = info->baseInfo.idleAnim;
+                }
+                else{
+                    ent->activeAnim = info->baseInfo.walkAnim;
+                }
             }
         }
-        else if(ent->activeAnim == runAnim && (ent->moveX == 0 && ent->moveY == 0))
-        {
-            ent->activeAnim = idleAnim;
+        else {
+            ent->moveX = 0; ent->moveY = 0;
         }
     }
+
     ent->MoveEntity();
 }
 
@@ -1073,83 +1055,109 @@ void UpdateEnemy(Entity* ent, int framecount, int DeathAnim, int AttackAnim, int
 
 
 
-
-
-
-
-
-
-
-
-
-
-
-bool Entity::CanMove()
+SDL_Rect AttackInfo::GetHitBox(Entity* ent)
 {
-    switch(typeID)
+    SDL_Rect res = AtkRect;
+    if(ent->flags & ENT_FLAGS::SPRITE_INVERSE)
     {
-    case ENT_TYPES::PLAYER: return (!(this->activeAnim <= MainCharacter::CharAnims::Attack4) && (activeAnim != MainCharacter::Death));
-    case ENT_TYPES::SKELETON: return (this->activeAnim == SkeletonEnemy::Ready || activeAnim == SkeletonEnemy::Run);
-    case ENT_TYPES::DEATH_BOSS: return (this->activeAnim == DeathBossEnemy::Walk || activeAnim == DeathBossEnemy::Idle || activeAnim == DeathBossEnemy::Hurt);
-    default:
-        break;
+        if(ent->ToRight())
+        {
+            res.x = -res.w - res.x;
+        }
+    }
+    else
+    {
+        if(!ent->ToRight())
+        {
+            res.x = -res.w - res.x;
+        }
+    }
+    res.x += ent->centerX;
+    res.y += ent->centerY;
+    return res;
+}
+
+bool Entity::CanMove(const EntityInfo* info)
+{
+    for(int i = 0; i < info->numAttacks; i++)
+    {
+        if(info->atks[i].animID == activeAnim){
+            return info->atks[i].canMove;
+        }
+    }
+    if(activeAnim == info->baseInfo.hitAnim && !info->baseInfo.canMoveWhileHit){
+        return false;
+    }
+    return true;
+}
+bool Entity::AnimIsAttack(const EntityInfo* info)
+{
+    for(int i = 0; i < info->numAttacks; i++)
+    {
+        if(info->atks[i].animID == activeAnim) return true;
     }
     return false;
 }
-bool Entity::AnimIsAttack()
+void Entity::Attack(const EntityInfo* info, int attackID)
 {
-    switch(typeID)
+    if(CanMove(info) && !AnimIsAttack(info) && attackID < info->numAttacks)
     {
-    case ENT_TYPES::PLAYER: return this->activeAnim <= MainCharacter::CharAnims::Attack4;
-    case ENT_TYPES::SKELETON: return this->activeAnim <= SkeletonEnemy::Attack2;
-    case ENT_TYPES::DEATH_BOSS: return this->activeAnim < DeathBossEnemy::Cast;
-    default:
-        break;
-    }
-    return false;
-}
-void Entity::Attack(int attackAnimID)
-{
-    if(CanMove())
-    {
-        activeAnim = attackAnimID;
+        activeAnim = info->atks[attackID].animID;
         frameIdx = 0;
+        comboIdx = (comboIdx + 1) % info->baseInfo.maxAttackCombo;
+        multipurposeCounter = 0;
     }
 }
-SDL_Rect Entity::GetHitbox()
+SDL_Rect Entity::GetHitBox(const EntityInfo* info)
 {
-    SDL_Rect result = GetHitBoxFromType(this->typeID);
+    SDL_Rect result = info->HitBox;
     result.x = centerX - result.w/2; result.y = centerY - result.h/2;
     return result;
 }
-void Entity::TakeDmg(int dmg, int hitAnim, int deathAnim)
+const EntityInfo* Entity::GetEntityInfo()
+{
+    if(typeID < ENT_TYPES::NUM_TYPES) return &infoList[(int)typeID];
+    return nullptr;
+}
+void Entity::TakeDmg(const EntityInfo* info, const AttackInfo* atkInfo)
 {
     if(health <= 0 || flags & ENT_FLAGS::DEAD) { 
         health = 0;
         return;
     }
-    health -= dmg;
+    health -= atkInfo->damage;
     if(health <= 0)
     {
         frameIdx = 0;
-        activeAnim = deathAnim;
+        multipurposeCounter = 0;
+        comboIdx = 0;
+        activeAnim = info->baseInfo.deathAnim;
         SetFlag(ENT_FLAGS::DEAD);
-        if(typeID != ENT_TYPES::PLAYER)
+        if(!(flags & ENT_FLAGS::IS_PLAYER))
             currentScore++;
     }
-    if(!(flags & ENT_FLAGS::DEAD) && !AnimIsAttack() && activeAnim != hitAnim)
+    if(!(flags & ENT_FLAGS::DEAD) && !AnimIsAttack(info) && activeAnim != info->baseInfo.hitAnim)
     {
-        activeAnim = hitAnim;
+        activeAnim = info->baseInfo.hitAnim;
         frameIdx = 0;
     }
 }
-void Entity::Draw()
+void Entity::Draw(const EntityInfo* info)
 {
-    Animation* anims = GetAnimationFromType(typeID);
-    if(anims)
+    Animation* anims = info->anims;
+    if(anims && activeAnim < info->numAnims)
     {
         anims[activeAnim].DrawIndex(centerX, centerY, frameIdx, ToRight());
     }
+}
+Entity Entity::Create(int cx, int cy, ENT_TYPES type, bool player)
+{
+    const EntityInfo* entInfo = &infoList[(int)type];
+    uint8_t flags = ENT_FLAGS::LOOK_RIGHT;
+    if(player) flags |= ENT_FLAGS::IS_PLAYER;
+    if(entInfo->baseInfo.spriteLooksLeft) flags |= ENT_FLAGS::SPRITE_INVERSE;
+    Entity res(cx, cy, entInfo->baseInfo.maxHealth, entInfo->baseInfo.idleAnim, type, flags);
+    return res;
 }
 
 
@@ -1158,7 +1166,7 @@ void Entity::Draw()
 void EntityList::Recreate()
 {
     entList.vec.clear();
-    entList.vec.push_back(PlayerEntity::Create(screenWidth/2, screenHeight/2));
+    entList.vec.push_back(Entity::Create(screenWidth/2, screenHeight/2, ENT_TYPES::PLAYER, true));
     currentScore = 0;
     currentTime = 0;
     areaStartX = 0;
@@ -1197,11 +1205,11 @@ void EntityList::AddRandomEnemy()
 
     if(entType < 900)
     {
-        vec.push_back(SkeletonEntity::Create(randX, randY));
+        vec.push_back(Entity::Create(randX, randY, ENT_TYPES::SKELETON, false));
     }
     else if(entType > 899)
     {
-        vec.push_back(DeathBossEntity::Create(randX, randY));
+        vec.push_back(Entity::Create(randX, randY, ENT_TYPES::DEATH_BOSS, false));
     }
 }
 
@@ -1213,24 +1221,13 @@ void EntityList::AddRandomEnemy()
 
 
 
-void PlayerHitCallback(Entity* player, Entity* hitter, int atkIdx)
+void PlayerHitCallback(Entity* player, Entity* hitter, const AttackInfo* atkInfo)
 {
-    int dmg = (hitter->typeID == ENT_TYPES::SKELETON) ? 10 : 30;
-    player->TakeDmg(dmg, MainCharacter::CharAnims::TakeHitSilhoutte, MainCharacter::CharAnims::Death);
+    player->TakeDmg(player->GetEntityInfo(), atkInfo);
 }
-void EnemyHitCallback(Entity* enemy, Entity* player, int atkIdx)
+void EnemyHitCallback(Entity* enemy, Entity* player, const AttackInfo* atkInfo)
 {
-    switch(enemy->typeID)
-    {
-    case ENT_TYPES::SKELETON:
-        enemy->TakeDmg(50, SkeletonEnemy::Hit, SkeletonEnemy::DeadFar);
-        break;
-    case ENT_TYPES::DEATH_BOSS:
-        enemy->TakeDmg(10, DeathBossEnemy::Hurt, DeathBossEnemy::Death);
-        break;
-    default:
-        break;
-    }
+    enemy->TakeDmg(enemy->GetEntityInfo(), atkInfo);
 }
 
 
@@ -1249,7 +1246,7 @@ void SetPlayerAsCenterOfScreenRoughly()
         int perfectMatchX = cx * (centerDist - 100.0f);
         int perfectMatchY = cy * (centerDist - 100.0f);
 
-        int mx = cx * (PRESS_SPEED + 5); int my = cy * (PRESS_SPEED + 5);
+        int mx = cx * (5 + 5); int my = cy * (5 + 5);   // movement speed should probably stored in a variable
         if(abs(mx) > abs(perfectMatchX)) mx = perfectMatchX;
         if(abs(my) > abs(perfectMatchY)) my = perfectMatchY;
         areaStartX += mx;
@@ -1328,14 +1325,18 @@ void MainLoop()
     for(int i = 0; i < entList.vec.size(); i++)
     {
         Entity* ent = &entList.vec.at(i);
-        ent->Draw();
+        ent->Draw(ent->GetEntityInfo());
         if(DRAW_DEBUG)
         {
-            SDL_Rect rec = ent->GetHitbox();
+            SDL_Rect rec = ent->GetHitBox(ent->GetEntityInfo());
             SDL_RenderDrawRect(renderer, &rec);
         }
     }
     userInput->DrawMobileControl();
+    SDL_Rect playerHpRect = player->GetHitBox(player->GetEntityInfo());
+    playerHpRect.y -= 10; playerHpRect.h = 5;
+    DrawHealthBar(playerHpRect, player->health);        
+    
     while(SDL_PollEvent(&event))
     {
         switch(event.type)
@@ -1348,22 +1349,14 @@ void MainLoop()
             break;
         }
     }
-    UpdatePlayer(player, g_gameStateCounter);
+
+
+    UpdateEntity(player, g_gameStateCounter);
     for(int i = 0; i < entList.vec.size(); i++)    // update Skeletons
     {
         if(&entList.vec.at(i) == player) continue;    // skip player
         Entity* ent = &entList.vec.at(i);
-        switch(ent->typeID)
-        {
-        case ENT_TYPES::SKELETON:
-            UpdateEnemy(ent, g_gameStateCounter, SkeletonEnemy::DeadFar, SkeletonEnemy::Attack2, SkeletonEnemy::Ready, SkeletonEnemy::Run);
-            break;
-        case ENT_TYPES::DEATH_BOSS:
-            UpdateEnemy(ent, g_gameStateCounter, DeathBossEnemy::Death, DeathBossEnemy::Attack, DeathBossEnemy::Idle, DeathBossEnemy::Walk);
-            break;
-        default:
-            break;
-        }
+        UpdateEntity(ent, g_gameStateCounter);
     }
     if((g_gameStateCounter % 300) == 0 && !(player->flags & ENT_FLAGS::DEAD)){
         int NumCreation = (rand() % 20) + 10;
@@ -1372,7 +1365,7 @@ void MainLoop()
         entList.Sort();
         player = entList.player;
     }
-    DrawHealthBar(healthBar, player->health);        
+
     if((player->flags & ENT_FLAGS::DEAD))
     {
         canRetry = true;
@@ -1413,8 +1406,8 @@ void MainLoop()
 void SetFullScreen()
 {
     EmscriptenFullscreenStrategy fsStrat;
-    fsStrat.scaleMode = EMSCRIPTEN_FULLSCREEN_SCALE();
-    fsStrat.canvasResolutionScaleMode = EMSCRIPTEN_FULLSCREEN_CANVAS_SCALE();
+    fsStrat.scaleMode = 0;
+    fsStrat.canvasResolutionScaleMode = 0;
     fsStrat.filteringMode = EMSCRIPTEN_FULLSCREEN_FILTERING_DEFAULT;
     fsStrat.canvasResizedCallback = nullptr;
     fsStrat.canvasResizedCallbackUserData = nullptr;
@@ -1439,6 +1432,16 @@ void SetScreenSizedElements()
         int py = entList.player->centerY;
 
     }
+
+    if(screenWidth < 900 || screenHeight < 600){
+        WORLD_SCALE = 1.0f;
+    }
+    else{
+        WORLD_SCALE = 2.0f;
+    }
+    infoList[0] = MainCharacterInfo();
+    infoList[1] = SkeletonInfo();
+    infoList[2] = DeathBossInfo();
 
 }
 EM_BOOL TouchStartCB(int eventType, const EmscriptenTouchEvent* ev, void* userData)
@@ -1520,19 +1523,15 @@ int main()
     SDL_CreateWindowAndRenderer(screenWidth, screenHeight, 0, &window, &renderer);
     userInput = new Input();
 
-
     background = LoadTextureFromFile("Assets/GrassBackground.png", nullptr, nullptr);
 
     font = TTF_OpenFont("Assets/OpenSans.ttf", FONT_SIZE);
     
     SetScreenSizedElements();
 
-    MainCharacter mainInfoStackVar;
-    SkeletonEnemy skelInfoStackVar;
-    DeathBossEnemy deathBossInfoStackVar;
-    mainInfo = &mainInfoStackVar;
-    skelInfo = &skelInfoStackVar;
-    deathBossInfo = &deathBossInfoStackVar;
+    infoList[0] = MainCharacterInfo();
+    infoList[1] = SkeletonInfo();
+    infoList[2] = DeathBossInfo();
 
     SDL_SetRenderDrawBlendMode(renderer, SDL_BlendMode::SDL_BLENDMODE_BLEND);
 
@@ -1547,7 +1546,6 @@ int main()
 
     emscripten_set_resize_callback(EMSCRIPTEN_EVENT_TARGET_WINDOW, nullptr, true, CanvasResizeCB);
     emscripten_set_fullscreenchange_callback("#canvas", nullptr, true, FullscreenChangeCB);
-
 
     entList.Recreate();
 

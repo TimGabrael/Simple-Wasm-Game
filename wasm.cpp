@@ -12,9 +12,11 @@
 #include <chrono>
 #include <sstream>
 #include <array>
+#include <cmath>
+#include <cfloat>
 
 
-
+struct fvec2{ float x,y; };
 SDL_Rect CreateRect(int x, int y, int w, int h){ SDL_Rect rec; rec.x = x; rec.y = y; rec.w = w; rec.h = h; return rec; }
 
 
@@ -29,10 +31,13 @@ static constexpr float INV_SQRT_2 = 0.70710678118f;
 #define FONT_SIZE 24
 static constexpr bool DRAW_DEBUG = false;
 static constexpr bool DRAW_FPS = false;
+static constexpr bool PRINT_DEBUG_TIMINGS = false;
 
 SDL_Window *window;
 SDL_Renderer *renderer;
-SDL_Texture* background;
+SDL_Texture* g_backgroundImage;
+int g_backgroundWidth;
+int g_backgroundHeight;
 TTF_Font* font;
 
 struct Entity;
@@ -43,6 +48,7 @@ enum class ENT_TYPES : uint16_t
     PLAYER,
     SKELETON,
     DEATH_BOSS,
+    BOSS_SPELL,
     NUM_TYPES,
 };
 enum ENT_FLAGS : uint8_t
@@ -54,6 +60,13 @@ enum ENT_FLAGS : uint8_t
     SPRITE_INVERSE = 16,    // set if the entity has a inverse sprite layout
     COMBO_ATTACK_AV = 32,   // set if combo attack is available
     IS_PLAYER = 64,
+};
+enum COLLISION_GROUPS : uint8_t
+{
+    COLLISION_NONE = 0,
+    COLLISION_PLAYER = 1,
+    COLLISION_ENEMY = 2,
+    COLLISION_ENVIRONMENT = U8_INVALID,
 };
 void SetDirection(Entity* ent);
 void SetFullScreen();
@@ -71,10 +84,10 @@ struct Entity
         typeID = type; flags = flag;
     }
     float health = 100.0f;   // 100.0f is default health
-    int16_t centerX = 0;
-    int16_t centerY = 0;
-    int16_t moveX = 0;
-    int16_t moveY = 0;
+    float centerX = 0;
+    float centerY = 0;
+    float moveX = 0;
+    float moveY = 0;
     ENT_TYPES typeID = ENT_TYPES::SKELETON;
     uint16_t multipurposeCounter = 0;
     uint8_t comboIdx = 0;
@@ -82,15 +95,11 @@ struct Entity
     uint8_t activeAnim = 0;
     uint8_t flags = ENT_FLAGS::LOOK_RIGHT;
 
-
-    void MoveEntity()
+    bool CorrectCollision(const EntityInfo* info, int listIdx, float stepSize);
+    void MoveEntity(const EntityInfo* info);
+    bool ToRight() const
     {
-        centerX += moveX;
-        centerY += moveY;
-    }
-    bool ToRight()
-    {
-        return flags & 1;
+        return flags & ENT_FLAGS::LOOK_RIGHT;
     }
     void SetFlag(ENT_FLAGS flag)
     {
@@ -108,9 +117,8 @@ struct Entity
     bool AnimIsAttack(const EntityInfo* info);
     void Attack(const EntityInfo* info, int atkID);
 
-    const EntityInfo* GetEntityInfo();
-    SDL_Rect GetHitBox(const EntityInfo* info);
-
+    const EntityInfo* GetEntityInfo() const;
+    SDL_Rect GetHitBox(const EntityInfo* info) const;
     void TakeDmg(const EntityInfo* info,  const AttackInfo* atkInfo);
     void Draw(const EntityInfo* info);
     static Entity Create(int cx, int cy, ENT_TYPES type, bool player);
@@ -118,6 +126,7 @@ struct Entity
 struct EntityList
 {
     std::vector<Entity> vec;
+    std::vector<Entity> inFrameSpawned;
     Entity* player = 0;
     bool _dirty = false;
     void Sort()
@@ -132,6 +141,11 @@ struct EntityList
                     newEntitys.push_back(vec.at(i));
                 }
             }
+            for(int i = 0; i < inFrameSpawned.size(); i++)
+            {
+                newEntitys.push_back(inFrameSpawned.at(i));
+            }
+            inFrameSpawned.clear();
             vec = std::move(newEntitys);
         }
         player = nullptr;
@@ -145,6 +159,7 @@ struct EntityList
     }
     void Recreate();
     void AddRandomEnemy();
+    void Update();
 };
 static EntityList entList;
 static SDL_Rect retryRect;
@@ -159,7 +174,7 @@ static int areaStartY = 0;
 static int screenWidth = 0;
 static int screenHeight = 0;
 static int g_gameStateCounter = 0;
-
+static constexpr float SCROLL_SPEED = 15.0f;
 
 
 
@@ -242,6 +257,39 @@ void DrawHealthBar(const SDL_Rect& bar, float hp)
     SDL_SetRenderDrawColor(renderer, 255, 0, 0, 255);
     SDL_RenderFillRect(renderer, &healthyRect);
 }
+void DrawBackground()
+{
+    const int realWidth = g_backgroundWidth * WORLD_SCALE;
+    const int realHeight = g_backgroundHeight * WORLD_SCALE;
+    int nx = (screenWidth / realWidth + 2);
+    int ny = (screenHeight / realHeight + 2);
+
+    int gx = nx * realWidth - screenWidth;
+    int gy = ny * realHeight - screenHeight;
+
+    int dx = -(areaStartX % realWidth);
+    int dy = -(areaStartY % realHeight);
+    if(dx < 0) dx = realWidth + dx;
+    if(dy < 0) dy = realHeight + dy;
+
+
+    SDL_Rect screenRect;
+    screenRect.x = -dx; screenRect.y = -dy; screenRect.w = realWidth; screenRect.h = realHeight;
+    for(int y = 0; y < ny; y++)
+    {
+
+        for(int x = 0; x < nx; x++)
+        {
+            SDL_RenderCopy(renderer, g_backgroundImage, nullptr, &screenRect);            
+            screenRect.x += realWidth;
+        }
+        screenRect.x = -dx;
+        screenRect.y += realHeight;
+    }
+    
+
+
+}
 bool RectangleCollisionTest(const SDL_Rect& rect1, const SDL_Rect& rect2)
 {
     if (rect1.x < rect2.x + rect2.w && rect1.x + rect1.w > rect2.x && rect1.y < rect2.y + rect2.h && rect1.h + rect1.y > rect2.y) {
@@ -249,7 +297,58 @@ bool RectangleCollisionTest(const SDL_Rect& rect1, const SDL_Rect& rect2)
     }
     return false;
 }
+bool RayRectangleCollisionTest(const fvec2& origin, const fvec2& dir, const SDL_Rect& rect, fvec2& hitPoint, fvec2& hitNormal, float& tHit)
+{
+    hitPoint = {0, 0}; hitNormal = {0, 0};
+    fvec2 near = { (rect.x - origin.x)/dir.x, (rect.y - origin.y) / dir.y };
+    fvec2 far = { (rect.x + rect.w - origin.x)/dir.x, (rect.y + rect.h - origin.y) / dir.y };
 
+    if(std::isnan(near.x) || std::isnan(near.y) || std::isnan(far.x) || std::isnan(far.y)) return false;
+
+    if(near.x > far.x) std::swap(near.x, far.x);
+    if(near.y > far.y) std::swap(near.y, far.y);
+    if(near.x > far.y || near.y > far.x) return false;
+
+    tHit = std::max(near.x, near.y);
+    float tfar = std::min(far.x, far.y);
+
+    if(tfar < 0.0f) {
+        return false;
+    }
+
+    hitPoint.x = origin.x + tHit * dir.x;
+    hitPoint.y = origin.y + tHit * dir.y;
+
+    hitNormal = {0, 0};
+
+    if(near.x > near.y){
+        if(dir.x < 0) hitNormal = { 1, 0 };
+        else hitNormal = { -1, 0 };
+    }
+    else if(near.x < near.y)
+    {
+        if(dir.y < 0) hitNormal = { 0, 1 };
+        else hitNormal = { 0, -1 };
+    }
+    return true;
+}
+bool CircleCircleCollisionTest(const fvec2& o1, float r1, const fvec2& o2, float r2, float stepSize, fvec2& overlap_2)
+{
+    float dx = o2.x - o1.x;
+    float dy = o2.y - o1.y;
+    float distance = sqrtf(dx*dx+dy*dy);
+    if(distance < (r1 + r2))
+    {
+        float tang = atan2f(dy, dx);
+        float angle = 0.5f * M_PI + tang;
+
+        float foverlap = 0.5f * (r1 + r2 - distance + 1);
+        overlap_2.x = sinf(angle) * foverlap * stepSize;
+        overlap_2.y = cosf(angle) * foverlap * stepSize;
+        return true;
+    }
+    return false;
+}
 
 struct MobileControlCircle
 {
@@ -402,7 +501,7 @@ struct Input
         }
         return false;
     }
-    void GetMoveXY(float movementSpeed, int16_t& moveX, int16_t& moveY)
+    void GetMoveXY(float movementSpeed, float& moveX, float& moveY)
     {
         if(moveCircleIdx == -1)
         {
@@ -430,7 +529,7 @@ struct Input
             }
             if(moveX && moveY)
             {
-                int diagMov = (int)(movementSpeed * INV_SQRT_2 + 0.5f);
+                float diagMov = (movementSpeed * INV_SQRT_2);
                 if(moveX < 0) moveX = -diagMov;
                 else moveX = diagMov;
                 if(moveY < 0) moveY = -diagMov;
@@ -442,6 +541,8 @@ struct Input
             float dx = (moveCircTouchX - MoveCircle.posX);
             float dy = (moveCircTouchY - MoveCircle.posY);
             float dist = sqrtf(dx * dx + dy * dy);
+            if(dist < 0.2f) {moveX = 0.0f; moveY = 0.0f; return;}
+
             float inv_dst = 1.0f / dist;
             float frad = MoveCircle.rad;
             dx *= inv_dst; dy *= inv_dst;
@@ -449,16 +550,8 @@ struct Input
                 dist = frad;
             }
             dx *= (dist / frad) * movementSpeed; dy *= (dist / frad) * movementSpeed;
-
-            if(abs(dx) > 0.5){
-                if(dx < 0.0f) moveX = dx - 0.5f;
-                else moveX = dx + 0.5f;
-            }
-            if(abs(dy) > 0.5){
-                if(dy < 0.0f) moveY = dy - 0.5f;
-                else moveY = dy + 0.5f;
-            }
-
+            moveX = dx;
+            moveY = dy;
         }
     }
     
@@ -652,6 +745,10 @@ struct EntityInfo
     Animation* anims = nullptr;
     BasicEntityInfo baseInfo;
     BasicEnemyInfo enemyInfo;
+    float mass;
+    float collisionRadius;
+    uint8_t collisionGroups;
+    bool isStatic;
 };
 static EntityInfo infoList[(size_t)ENT_TYPES::NUM_TYPES];
 struct MainCharacterInfo : public EntityInfo
@@ -683,8 +780,13 @@ struct MainCharacterInfo : public EntityInfo
 
         baseInfo.maxHealth = 100.0f; baseInfo.movementSpeed = 6.0f * WORLD_SCALE; baseInfo.corpseDuration = 0; baseInfo.deathAnim = Death; baseInfo.idleAnim = Idle; baseInfo.walkAnim = Run; baseInfo.corpseAnim = U8_INVALID; baseInfo.spriteLooksLeft = false;
         baseInfo.maxAttackCombo = 2; baseInfo.hitAnim = TakeHitSilhoutte; baseInfo.canMoveWhileHit = true;
-        HitBox.x = hboxW/2 * WORLD_SCALE; HitBox.y = hboxH/2 * WORLD_SCALE;
+        HitBox.x = -hboxW/2 * WORLD_SCALE; HitBox.y = -hboxH/2 * WORLD_SCALE;
         HitBox.w = hboxW * WORLD_SCALE; HitBox.h = hboxH * WORLD_SCALE;
+
+        collisionGroups = COLLISION_GROUPS::COLLISION_PLAYER;
+        collisionRadius = 10.0f * WORLD_SCALE;
+        mass = 1.0f;
+        isStatic = false;
     }
     
 
@@ -735,8 +837,14 @@ struct SkeletonInfo : public EntityInfo
         baseInfo.maxAttackCombo = 1; baseInfo.hitAnim = Hit; baseInfo.canMoveWhileHit = false;
         enemyInfo.attackRadius = 30.0f * WORLD_SCALE; enemyInfo.moveRadius = 20.0f * WORLD_SCALE; enemyInfo.removeIdx = 10;
 
-        HitBox.x = hboxW / 2 * WORLD_SCALE; HitBox.y = hboxH / 2 * WORLD_SCALE;
+        HitBox.x = -hboxW / 2 * WORLD_SCALE; HitBox.y = -hboxH / 2 * WORLD_SCALE;
         HitBox.w = hboxW * WORLD_SCALE; HitBox.h = hboxH * WORLD_SCALE;
+
+       
+        collisionGroups = COLLISION_GROUPS::COLLISION_ENEMY;
+        collisionRadius = 10.0f * WORLD_SCALE;
+        mass = 1.0f;
+        isStatic = false;
     }
 
 
@@ -786,16 +894,20 @@ struct DeathBossInfo : public EntityInfo
 
         baseInfo.corpseDuration = 0; baseInfo.deathAnim = Death; baseInfo.idleAnim = Idle; baseInfo.maxHealth = 100.0f; baseInfo.movementSpeed = 3.0f * WORLD_SCALE; baseInfo.walkAnim = Walk; baseInfo.corpseAnim = U8_INVALID; baseInfo.spriteLooksLeft = true;
         baseInfo.maxAttackCombo = 1; baseInfo.hitAnim = Hurt; baseInfo.canMoveWhileHit = true;
-        enemyInfo.attackRadius = 75.0f * WORLD_SCALE; enemyInfo.moveRadius = 30.0f * WORLD_SCALE; enemyInfo.removeIdx = 0;
+        enemyInfo.attackRadius = 400.0f * WORLD_SCALE; enemyInfo.moveRadius = 30.0f * WORLD_SCALE; enemyInfo.removeIdx = 0;
 
-        HitBox.x = hboxW / 2 * WORLD_SCALE; HitBox.y = hboxH / 2 * WORLD_SCALE;
+        HitBox.x = -hboxW / 2 * WORLD_SCALE; HitBox.y = -hboxH / 2 * WORLD_SCALE;
         HitBox.w = hboxW * WORLD_SCALE; HitBox.h = hboxH * WORLD_SCALE;
+
+        collisionGroups = COLLISION_GROUPS::COLLISION_ENEMY;
+        collisionRadius = 15.0f * WORLD_SCALE;
+        mass = 2.0f;
+        isStatic = false;
     }
 
 private:
     static constexpr int hboxW = 30;
     static constexpr int hboxH = 60;
-
     static constexpr std::array<AnimationCreationData, NUM_ANIMATIONS> _animData = {{
         {"Assets/Death-Boss/Attack.png", 10, 10},
         {"Assets/Death-Boss/Cast.png", 9, 9},
@@ -806,11 +918,44 @@ private:
         {"Assets/Death-Boss/Walk.png", 8, 8}
     }};
 };
+struct BossSpellInfo : public EntityInfo
+{
+    enum BossSpellAnims
+    {
+        Spawn,
+        NUM_ANIMATIONS,
+    };
+    BossSpellInfo()
+    {
+        SetAnims<NUM_ANIMATIONS>(_animData);
+        //for(int i = 0; i < NUM_ANIMATIONS; i++) anims[i].SetOffset(-35, 20);
 
+        numAttacks = 1;
+        atks = new AttackInfo[numAttacks];
+        auto& a1 = atks[0]; a1.animID = Spawn; a1.AtkRect = CreateRect(-hboxW / 2 * WORLD_SCALE, (-hboxH / 2 + 18) * WORLD_SCALE, hboxW * WORLD_SCALE, hboxH * WORLD_SCALE); a1.damage = 80.0f; a1.duration = 4; a1.startDmgframe = 8; a1.canMove = false; a1.friendlyFire = false;
+
+        baseInfo.corpseDuration = 0; baseInfo.deathAnim = U8_INVALID; baseInfo.idleAnim = U8_INVALID; baseInfo.maxHealth = 1000000.0f; baseInfo.movementSpeed = 0; baseInfo.walkAnim = U8_INVALID; baseInfo.corpseAnim = U8_INVALID; baseInfo.spriteLooksLeft = true;
+        baseInfo.maxAttackCombo = 1; baseInfo.hitAnim = U8_INVALID; baseInfo.canMoveWhileHit = true;
+        enemyInfo.attackRadius = 0; enemyInfo.moveRadius = 0; enemyInfo.removeIdx = 0;
+
+        HitBox.x = 0; HitBox.y = 0;
+        HitBox.w = 0; HitBox.h = 0;
+
+        collisionGroups = COLLISION_GROUPS::COLLISION_NONE;
+        collisionRadius = 0.0f;
+        mass = 0.0f;
+        isStatic = false;
+    }
+private:
+    static constexpr int hboxW = 34;
+    static constexpr int hboxH = 60;
+    static constexpr std::array<AnimationCreationData, NUM_ANIMATIONS> _animData = {{
+        {"Assets/Death-Boss/Spell.png", 16, 16},
+    }};
+};
 
 void SetDirection(Entity* ent)
 {
-
     if(ent->moveX > 0) {
         if(ent->flags & ENT_FLAGS::SPRITE_INVERSE) ent->ClearFlag(ENT_FLAGS::LOOK_RIGHT);  
         else ent->SetFlag(ENT_FLAGS::LOOK_RIGHT);
@@ -830,6 +975,7 @@ void HitTestAll(Entity* source, const AttackInfo* atkInfo, const SDL_Rect& hitRe
         Entity* hit = &entList.vec.at(i);
         if(hit->flags & ENT_FLAGS::DEAD) continue;
         SDL_Rect enemyHBox = hit->GetHitBox(hit->GetEntityInfo());
+        if(enemyHBox.w == 0 || enemyHBox.h == 0) continue;
         if(RectangleCollisionTest(hitRec, enemyHBox))
         {
             EnemyHitCallback(hit, source, atkInfo);
@@ -887,6 +1033,23 @@ void HandleEntityDeathTick(Entity* ent, const EntityInfo* info, int frameCount)
         ent->multipurposeCounter++;   // cleanup counter
     }
 }
+void HandleAttackAnimEnd(Entity* ent, const EntityInfo* info, int frameCount)
+{
+    if(ent->typeID == ENT_TYPES::DEATH_BOSS){
+        if(ent->activeAnim == DeathBossInfo::DeathBossAnims::Cast)
+        {
+            const EntityInfo* spellInfo = &infoList[(size_t)ENT_TYPES::BOSS_SPELL];
+            entList.inFrameSpawned.push_back(Entity::Create(entList.player->centerX, entList.player->centerY - spellInfo->atks[0].AtkRect.h / 2, ENT_TYPES::BOSS_SPELL, false));
+            auto& spell = entList.inFrameSpawned.at(entList.inFrameSpawned.size() - 1);
+            spell.activeAnim = spellInfo->atks[0].animID; spell.frameIdx = 0;
+            entList._dirty = true;
+        }
+    }
+    else if(ent->typeID == ENT_TYPES::BOSS_SPELL)
+    {
+        ent->SetFlag(ENT_FLAGS::CLEAN_UP);
+    }
+}
 void HandleEntityMoveAndAttack(Entity* ent, const EntityInfo* info, int frameCount)
 {
     if(ent->flags & ENT_FLAGS::IS_PLAYER)
@@ -903,10 +1066,27 @@ void HandleEntityMoveAndAttack(Entity* ent, const EntityInfo* info, int frameCou
         float distance = GetMoveToPlayer(ent, info);
         if(distance < info->enemyInfo.attackRadius)
         {
-            int atkRand = rand() % 8;
-            if(atkRand == 0)
+            if(ent->typeID == ENT_TYPES::DEATH_BOSS){
+                if(distance > info->atks[0].AtkRect.w){
+                    int atkRand = rand() % 150;
+                    if(atkRand == 0){
+                        ent->Attack(info, 1);
+                    }
+                }
+                else{
+                    int atkRand = rand() % 20;
+                    if(atkRand == 0){
+                        ent->Attack(info, 0);
+                    }
+                }
+            }
+            else
             {
-                ent->Attack(info, 0);
+                int atkRand = rand() % 8;
+                if(atkRand == 0)
+                {
+                    ent->Attack(info, 0);
+                }
             }   
         }
     }
@@ -940,6 +1120,7 @@ void UpdateEntity(Entity* ent, int frameCount)
         ent->ClearFlag(ENT_FLAGS::HIT_CHECKED);
         if(ent->AnimIsAttack(info) && ent->frameIdx == info->anims[ent->activeAnim].numFrames)
         {
+            HandleAttackAnimEnd(ent, info, frameCount);
             ent->frameIdx = 0; ent->activeAnim = info->baseInfo.idleAnim;
             ent->SetFlag(ENT_FLAGS::COMBO_ATTACK_AV);
         }
@@ -1043,8 +1224,6 @@ void UpdateEntity(Entity* ent, int frameCount)
             ent->moveX = 0; ent->moveY = 0;
         }
     }
-
-    ent->MoveEntity();
 }
 
 
@@ -1077,6 +1256,34 @@ SDL_Rect AttackInfo::GetHitBox(Entity* ent)
     return res;
 }
 
+
+bool Entity::CorrectCollision(const EntityInfo* info, int listIdx, float stepSize)
+{
+    if(flags & ENT_FLAGS::DEAD) return false;
+    bool hadColl = false;
+    for(size_t i = listIdx + 1; i < entList.vec.size(); i++)
+    {
+        Entity* e = &entList.vec.at(i);
+        if(e == this)continue;
+        if(e->flags & ENT_FLAGS::DEAD) continue;
+        const EntityInfo* eInfo = e->GetEntityInfo();
+        if(!(info->collisionGroups & eInfo->collisionGroups)) continue;
+        
+        fvec2 overlapResult;
+        if(CircleCircleCollisionTest({centerX, centerY}, info->collisionRadius, { e->centerX, e->centerY }, eInfo->collisionRadius, stepSize, overlapResult))
+        {
+            centerX -= overlapResult.x; centerY += overlapResult.y;
+            e->centerX += overlapResult.x; e->centerY -= overlapResult.y;
+            hadColl = true;
+        }
+    }
+    return hadColl;
+}
+void Entity::MoveEntity(const EntityInfo* info)
+{
+    centerX += moveX;
+    centerY += moveY;
+}
 bool Entity::CanMove(const EntityInfo* info)
 {
     for(int i = 0; i < info->numAttacks; i++)
@@ -1108,21 +1315,26 @@ void Entity::Attack(const EntityInfo* info, int attackID)
         multipurposeCounter = 0;
     }
 }
-SDL_Rect Entity::GetHitBox(const EntityInfo* info)
+SDL_Rect Entity::GetHitBox(const EntityInfo* info) const
 {
     SDL_Rect result = info->HitBox;
-    result.x = centerX - result.w/2; result.y = centerY - result.h/2;
+    if(!ToRight())
+    {
+        result.x = -result.x-result.w;
+    }
+    result.x += centerX; result.y += centerY;
     return result;
 }
-const EntityInfo* Entity::GetEntityInfo()
+const EntityInfo* Entity::GetEntityInfo() const
 {
     if(typeID < ENT_TYPES::NUM_TYPES) return &infoList[(int)typeID];
     return nullptr;
 }
 void Entity::TakeDmg(const EntityInfo* info, const AttackInfo* atkInfo)
 {
-    if(health <= 0 || flags & ENT_FLAGS::DEAD) { 
+    if(health <= 0 || (flags & ENT_FLAGS::DEAD)) { 
         health = 0;
+        SetFlag(ENT_FLAGS::DEAD);
         return;
     }
     health -= atkInfo->damage;
@@ -1131,6 +1343,7 @@ void Entity::TakeDmg(const EntityInfo* info, const AttackInfo* atkInfo)
         frameIdx = 0;
         multipurposeCounter = 0;
         comboIdx = 0;
+        moveX = 0; moveY = 0;
         activeAnim = info->baseInfo.deathAnim;
         SetFlag(ENT_FLAGS::DEAD);
         if(!(flags & ENT_FLAGS::IS_PLAYER))
@@ -1212,7 +1425,26 @@ void EntityList::AddRandomEnemy()
         vec.push_back(Entity::Create(randX, randY, ENT_TYPES::DEATH_BOSS, false));
     }
 }
-
+void EntityList::Update()
+{
+    for(int i = 0; i < entList.vec.size(); i++)    // update Skeletons
+    {
+        Entity* ent = &vec.at(i);
+        const EntityInfo* info = ent->GetEntityInfo();
+        UpdateEntity(ent, g_gameStateCounter);
+        ent->MoveEntity(info);
+    }
+    static constexpr float sSize = 1.0f / 8.0f;
+    for(int j = 0; j < 8; j++)
+    {
+        for(int i = 0; i < entList.vec.size(); i++)
+        {
+            Entity* ent = &vec.at(i);const EntityInfo* info = ent->GetEntityInfo();
+            ent->CorrectCollision(info, i, sSize);
+        }
+    }
+    
+}
 
 
 
@@ -1246,7 +1478,7 @@ void SetPlayerAsCenterOfScreenRoughly()
         int perfectMatchX = cx * (centerDist - 100.0f);
         int perfectMatchY = cy * (centerDist - 100.0f);
 
-        int mx = cx * (5 + 5); int my = cy * (5 + 5);   // movement speed should probably stored in a variable
+        int mx = cx * SCROLL_SPEED; int my = cy * SCROLL_SPEED;   // movement speed should probably stored in a variable
         if(abs(mx) > abs(perfectMatchX)) mx = perfectMatchX;
         if(abs(my) > abs(perfectMatchY)) my = perfectMatchY;
         areaStartX += mx;
@@ -1260,83 +1492,47 @@ void SetPlayerAsCenterOfScreenRoughly()
 
 }
 
+void RandomSpawnEnemys()
+{
+    int NumCreation = (rand() % 20) + 10;
+    for(int i = 0; i < NumCreation; i++)
+        entList.AddRandomEnemy();
+    entList.Sort();
+}
 
+
+
+static std::chrono::high_resolution_clock::time_point DEBUG_TIMING_TIMEPOINT;
 void MainLoop()
 {
     static std::chrono::high_resolution_clock::time_point prev = std::chrono::high_resolution_clock::now();
     std::chrono::high_resolution_clock::time_point now = std::chrono::high_resolution_clock::now();
     currentTime += std::chrono::duration<float>(now - prev).count();
-    SDL_Event event;
+
+    if(PRINT_DEBUG_TIMINGS)
+    {
+        std::cout << "<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<" << std::endl;
+        DEBUG_TIMING_TIMEPOINT = std::chrono::high_resolution_clock::now();
+    }
     if(!entList.player) entList.Sort();
     Entity* player = entList.player;
 
     SDL_SetRenderDrawColor(renderer, 10, 10, 255, 0);
     SDL_RenderClear(renderer);
     
-    {   // Draw The Background
-        uint32_t fmt;
-        int access, w,h;
-        SDL_QueryTexture(background, &fmt, &access, &w, &h);
-        int clipAreaX = areaStartX % screenWidth; int clipAreaY = areaStartY % screenHeight;
-        if(clipAreaX < 0) clipAreaX = screenWidth + clipAreaX;
-        if(clipAreaY < 0) clipAreaY = screenHeight + clipAreaY;
-        const float scaleX = (float)w / (float)screenWidth;
-        const float scaleY = (float)h / (float)screenHeight;
-
-        int scaleClipAreaX = clipAreaX * scaleX; int scaleClipAreaY = clipAreaY * scaleY;
-        int scaleStartX = w - scaleClipAreaX; int scaleStartY = h - scaleClipAreaY;
-        int scaleEndX = (screenWidth * scaleX) - scaleClipAreaX; int scaleEndY = (screenHeight * scaleY) - scaleClipAreaY;
-
-        SDL_Rect curAreaRect; curAreaRect.x = 0; curAreaRect.y = 0;
-        curAreaRect.w = clipAreaX; curAreaRect.h = clipAreaY;
-        SDL_Rect bgRect; bgRect.x = scaleStartX; bgRect.y = scaleStartY;
-        bgRect.w = scaleClipAreaX; bgRect.h = scaleClipAreaY;
-        SDL_RenderCopy(renderer, background, &bgRect, &curAreaRect);
-
-        curAreaRect.x = clipAreaX; curAreaRect.y = 0;
-        curAreaRect.w = screenWidth - clipAreaX; curAreaRect.h = clipAreaY;
-        bgRect.x = 0; bgRect.y = scaleStartY;
-        bgRect.w = scaleEndX; bgRect.h = scaleClipAreaY;
-        SDL_RenderCopy(renderer, background, &bgRect, &curAreaRect);
-
-        curAreaRect.x = 0; curAreaRect.y = clipAreaY;
-        curAreaRect.w = clipAreaX; curAreaRect.h = screenHeight - clipAreaY;
-        bgRect.x = scaleStartX; bgRect.y = 0;
-        bgRect.w = scaleClipAreaX; bgRect.h = scaleEndY;
-        SDL_RenderCopy(renderer, background, &bgRect, &curAreaRect);
-
-        curAreaRect.x = clipAreaX; curAreaRect.y = clipAreaY;
-        curAreaRect.w = screenWidth - clipAreaX; curAreaRect.h = screenHeight - clipAreaY;
-        bgRect.x = 0; bgRect.y = 0;
-        bgRect.w = scaleEndX; bgRect.h = scaleEndY;
-        SDL_RenderCopy(renderer, background, &bgRect, &curAreaRect);
-    }
-
-    
-
-
-
-
+    DrawBackground();
 
     SDL_SetRenderDrawColor(renderer, 0, 0, 0, 150);
     SDL_RenderFillRect(renderer, NULL);
     SDL_SetRenderDrawColor(renderer, 255, 0, 0, 255);
-
-    for(int i = 0; i < entList.vec.size(); i++)
-    {
-        Entity* ent = &entList.vec.at(i);
-        ent->Draw(ent->GetEntityInfo());
-        if(DRAW_DEBUG)
-        {
-            SDL_Rect rec = ent->GetHitBox(ent->GetEntityInfo());
-            SDL_RenderDrawRect(renderer, &rec);
-        }
-    }
-    userInput->DrawMobileControl();
-    SDL_Rect playerHpRect = player->GetHitBox(player->GetEntityInfo());
-    playerHpRect.y -= 10; playerHpRect.h = 5;
-    DrawHealthBar(playerHpRect, player->health);        
     
+    if (PRINT_DEBUG_TIMINGS)
+    {
+        auto NOW_TIMEPOINT = std::chrono::high_resolution_clock::now();
+        std::cout << "PREPARE_FRAME TIME: " << std::chrono::duration<float>(NOW_TIMEPOINT - DEBUG_TIMING_TIMEPOINT).count() * 1000 << std::endl;
+        DEBUG_TIMING_TIMEPOINT = std::chrono::high_resolution_clock::now();
+    }
+    SDL_Event event;
     while(SDL_PollEvent(&event))
     {
         switch(event.type)
@@ -1349,20 +1545,48 @@ void MainLoop()
             break;
         }
     }
-
-
-    UpdateEntity(player, g_gameStateCounter);
-    for(int i = 0; i < entList.vec.size(); i++)    // update Skeletons
+    if (PRINT_DEBUG_TIMINGS)
     {
-        if(&entList.vec.at(i) == player) continue;    // skip player
-        Entity* ent = &entList.vec.at(i);
-        UpdateEntity(ent, g_gameStateCounter);
+        auto NOW_TIMEPOINT = std::chrono::high_resolution_clock::now();
+        std::cout << "EVENT_POLL TIME: " << std::chrono::duration<float>(NOW_TIMEPOINT - DEBUG_TIMING_TIMEPOINT).count() * 1000 << std::endl;
+        DEBUG_TIMING_TIMEPOINT = std::chrono::high_resolution_clock::now();
+    }  
+
+    entList.Update();
+
+    if (PRINT_DEBUG_TIMINGS)
+    {
+        auto NOW_TIMEPOINT = std::chrono::high_resolution_clock::now();
+        std::cout << "UPDATE TIME: " << std::chrono::duration<float>(NOW_TIMEPOINT - DEBUG_TIMING_TIMEPOINT).count() * 1000 << std::endl;
+        DEBUG_TIMING_TIMEPOINT = std::chrono::high_resolution_clock::now();
     }
+    for(int i = 0; i < entList.vec.size(); i++)
+    {
+        Entity* ent = &entList.vec.at(i);
+        ent->Draw(ent->GetEntityInfo());
+        if(DRAW_DEBUG)
+        {
+            SDL_Rect rec = ent->GetHitBox(ent->GetEntityInfo());
+            SDL_SetRenderDrawColor(renderer, 255, 0, 0, 255);
+            SDL_RenderDrawRect(renderer, &rec);
+            SDL_SetRenderDrawColor(renderer, 0, 255, 0, 255);
+            DrawCircle(ent->centerX, ent->centerY, ent->GetEntityInfo()->collisionRadius);
+
+        }
+    }
+    userInput->DrawMobileControl();
+    SDL_Rect playerHpRect = player->GetHitBox(player->GetEntityInfo());
+    playerHpRect.y -= 10; playerHpRect.h = 5;
+    DrawHealthBar(playerHpRect, player->health);
+    if (PRINT_DEBUG_TIMINGS)
+    {
+        auto NOW_TIMEPOINT = std::chrono::high_resolution_clock::now();
+        std::cout << "RENDERING TIME: " << std::chrono::duration<float>(NOW_TIMEPOINT - DEBUG_TIMING_TIMEPOINT).count() * 1000 << std::endl;
+        DEBUG_TIMING_TIMEPOINT = std::chrono::high_resolution_clock::now();
+    }
+
     if((g_gameStateCounter % 300) == 0 && !(player->flags & ENT_FLAGS::DEAD)){
-        int NumCreation = (rand() % 20) + 10;
-        for(int i = 0; i < NumCreation; i++)
-            entList.AddRandomEnemy();
-        entList.Sort();
+        RandomSpawnEnemys();
         player = entList.player;
     }
 
@@ -1373,9 +1597,14 @@ void MainLoop()
         SDL_RenderFillRect(renderer, &retryRect);
         DrawText("RETRY", 0, 150, screenWidth, 0, 255, 0, 255, true);
     }
-    
     entList.Sort();
     SetPlayerAsCenterOfScreenRoughly();
+    if(PRINT_DEBUG_TIMINGS)
+    {
+        auto NOW_TIMEPOINT = std::chrono::high_resolution_clock::now();
+        std::cout << "SORT TIME: " << std::chrono::duration<float>(NOW_TIMEPOINT - DEBUG_TIMING_TIMEPOINT).count() * 1000 << std::endl;
+        DEBUG_TIMING_TIMEPOINT = std::chrono::high_resolution_clock::now();
+    }
     DrawText((std::string("SCORE: ") + std::to_string(currentScore)).c_str(), 0, 20, screenWidth, 255, 0, 0, 255, true);
     {
         std::stringstream ss;
@@ -1392,9 +1621,25 @@ void MainLoop()
         DrawText(ss.str().c_str(), 200, 20, 10000, 255, 255, 255, 255, false);
     }
 
+
     g_gameStateCounter++;
+    if(PRINT_DEBUG_TIMINGS)
+    {
+        auto NOW_TIMEPOINT = std::chrono::high_resolution_clock::now();
+        std::cout << "DRAW_TEXT TIME: " << std::chrono::duration<float>(NOW_TIMEPOINT - DEBUG_TIMING_TIMEPOINT).count() * 1000 << std::endl;
+        DEBUG_TIMING_TIMEPOINT = std::chrono::high_resolution_clock::now();
+    }
     SDL_RenderPresent(renderer);
+    if(PRINT_DEBUG_TIMINGS)
+    {
+        auto NOW_TIMEPOINT = std::chrono::high_resolution_clock::now();
+        std::cout << "SDL_RENDERPRESENT TIME: " << std::chrono::duration<float>(NOW_TIMEPOINT - DEBUG_TIMING_TIMEPOINT).count() * 1000 << std::endl;
+    }
     prev = std::chrono::high_resolution_clock::now();
+    if(PRINT_DEBUG_TIMINGS)
+    {
+        std::cout << "FRAME TIME: " << std::chrono::duration<float>(prev - now).count() * 1000 << std::endl;
+    }
 }
 
 
@@ -1442,7 +1687,7 @@ void SetScreenSizedElements()
     infoList[0] = MainCharacterInfo();
     infoList[1] = SkeletonInfo();
     infoList[2] = DeathBossInfo();
-
+    infoList[3] = BossSpellInfo();
 }
 EM_BOOL TouchStartCB(int eventType, const EmscriptenTouchEvent* ev, void* userData)
 {
@@ -1505,7 +1750,6 @@ EM_BOOL CanvasResizeCB(int eventType, const EmscriptenUiEvent* uiEvent, void* us
 }
 EM_BOOL FullscreenChangeCB(int eventType, const EmscriptenFullscreenChangeEvent* fullscreenChangeEvent, void *userData)
 {
-
     isFullscreen = fullscreenChangeEvent->isFullscreen;
     return true;
 }
@@ -1523,15 +1767,11 @@ int main()
     SDL_CreateWindowAndRenderer(screenWidth, screenHeight, 0, &window, &renderer);
     userInput = new Input();
 
-    background = LoadTextureFromFile("Assets/GrassBackground.png", nullptr, nullptr);
+    g_backgroundImage = LoadTextureFromFile("Assets/GrassBackground.png", &g_backgroundWidth, &g_backgroundHeight);
 
     font = TTF_OpenFont("Assets/OpenSans.ttf", FONT_SIZE);
     
     SetScreenSizedElements();
-
-    infoList[0] = MainCharacterInfo();
-    infoList[1] = SkeletonInfo();
-    infoList[2] = DeathBossInfo();
 
     SDL_SetRenderDrawBlendMode(renderer, SDL_BlendMode::SDL_BLENDMODE_BLEND);
 
@@ -1550,5 +1790,4 @@ int main()
     entList.Recreate();
 
     emscripten_set_main_loop(MainLoop, 30, true);
-
 }
